@@ -33,18 +33,6 @@ def _encode_json(value: dict[str, Any]) -> str:
     return json.dumps(value, indent=2, sort_keys=True, separators=(",", ": "))
 
 
-def _materialize(dataset: Any) -> Any:
-    """Read an array from common container APIs while preserving plain values."""
-    if not hasattr(dataset, "__getitem__"):
-        return dataset
-    for selection in ((), Ellipsis):
-        try:
-            return dataset[selection]
-        except (IndexError, TypeError, ValueError):
-            continue
-    return dataset
-
-
 class BinsparseFile(ABC):
     """Common interface to a Binsparse binary container or container group."""
 
@@ -86,7 +74,7 @@ class HDF5BinsparseFile(BinsparseFile):
         self.group.attrs[BINSPARSE_HEADER] = _encode_json(value)
 
     def __getitem__(self, key: str) -> Any:
-        return _materialize(self.group[key])
+        return self.group[key][()]
 
     def __setitem__(self, key: str, value: Any) -> None:
         if key in self.group:
@@ -114,7 +102,7 @@ class ZarrBinsparseFile(BinsparseFile):
         self.group.attrs[BINSPARSE_HEADER] = value
 
     def __getitem__(self, key: str) -> Any:
-        return _materialize(self.group[key])
+        return self.group[key][...]
 
     def __setitem__(self, key: str, value: Any) -> None:
         if key in self.group:
@@ -152,7 +140,7 @@ class NPZBinsparseFile(BinsparseFile):
     def __getitem__(self, key: str) -> Any:
         if key == BINSPARSE_HEADER:
             raise KeyError("use the 'header' property to access binsparse metadata")
-        return _materialize(self.archive[key])
+        return self.archive[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
         if key == BINSPARSE_HEADER:
