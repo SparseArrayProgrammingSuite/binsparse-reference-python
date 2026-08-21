@@ -4,12 +4,15 @@ from typing import Any
 
 import numpy as np
 
+from binsparse.conversions.numpy import from_numpy, to_numpy
 from binsparse.tensor import (
     BinsparseTensor,
     COORMatrix,
     CSCMatrix,
     CSRMatrix,
     CustomTensor,
+    DenseLevel,
+    DMATCMatrix,
     DMATRMatrix,
     DVECVector,
     ElementLevel,
@@ -54,19 +57,22 @@ def from_torch(value: Any, *, copy: bool | None = None) -> BinsparseTensor:
         raise TypeError("expected a PyTorch tensor")
 
     if value.layout == torch.strided:
-        values = _numpy(value, copy).reshape(-1)
-        common = (tuple(value.shape), int(values.size))
-        if value.ndim == 1:
-            return DVECVector(*common, values=values)
-        if value.ndim == 2:
-            return DMATRMatrix(*common, values=values)
-        raise TypeError("only one- and two-dimensional dense tensors are supported")
+        array = _numpy(value, copy)
+        return from_numpy(array, copy=False if copy is True else copy)
 
     if value.layout == torch.sparse_coo:
         indices = _numpy(value._indices(), copy)
         values = _numpy(value._values(), copy)
         if value.dense_dim() != 0:
             raise TypeError("hybrid sparse COO tensors are not supported")
+        if value.sparse_dim() == 2:
+            return COORMatrix(
+                tuple(value.shape),
+                int(values.size),
+                indices_0=indices[0, :],
+                indices_1=indices[1, :],
+                values=values,
+            )
         return CustomTensor(
             tuple(value.shape),
             int(values.size),
@@ -113,8 +119,18 @@ def to_torch(
 ) -> Any:
     """Convert a supported Binsparse tensor to PyTorch, optionally on *device*."""
     torch = _torch()
-    if isinstance(tensor, (DVECVector, DMATRMatrix)):
-        return _tensor(torch, tensor.values, device, copy).reshape(tensor.shape)
+    if (
+        isinstance(tensor, (DVECVector, DMATRMatrix, DMATCMatrix))
+        or isinstance(tensor, CustomTensor)
+        and tensor.transpose is None
+        and (
+            isinstance(tensor.level, ElementLevel)
+            or isinstance(tensor.level, DenseLevel)
+            and tensor.level.rank == len(tensor.shape)
+            and isinstance(tensor.level.level, ElementLevel)
+        )
+    ):
+        return _tensor(torch, to_numpy(tensor, copy=False), device, copy)
 
     if tensor.fill is True and tensor.fill_value != 0:
         raise ValueError("PyTorch conversion requires a zero fill value")

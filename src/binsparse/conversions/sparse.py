@@ -36,6 +36,16 @@ def from_sparse(value: Any, *, copy: bool | None = None) -> BinsparseTensor:
     count = int(value.data.size)
     indices = tuple(value.coords[dimension, :] for dimension in range(value.ndim))
     values = value.data
+    if value.ndim == 2:
+        return COORMatrix(
+            shape,
+            count,
+            fill=True,
+            fill_value=fill_value,
+            indices_0=indices[0],
+            indices_1=indices[1],
+            values=values,
+        )
     return CustomTensor(
         shape,
         count,

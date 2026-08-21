@@ -5,8 +5,10 @@ import pytest
 
 from binsparse.conversions import from_torch, to_torch
 from binsparse.tensor import (
+    COORMatrix,
     CSRMatrix,
     CustomTensor,
+    DenseLevel,
     DMATRMatrix,
     DVECVector,
     ElementLevel,
@@ -23,6 +25,18 @@ def test_torch_dense_round_trip() -> None:
 
     assert isinstance(tensor, DMATRMatrix)
     np.testing.assert_array_equal(result.numpy(), source.numpy())
+
+
+def test_torch_nd_dense_round_trip() -> None:
+    source = torch.arange(24).reshape(2, 3, 4)
+    tensor = from_torch(source, copy=False)
+    result = to_torch(tensor, copy=False)
+
+    assert isinstance(tensor, CustomTensor)
+    assert isinstance(tensor.level, DenseLevel)
+    assert tensor.level.rank == source.ndim
+    assert result.data_ptr() == source.data_ptr()
+    assert torch.equal(result, source)
 
 
 def test_torch_csr_round_trip() -> None:
@@ -42,7 +56,7 @@ def test_torch_uncoalesced_coo_preserves_entries() -> None:
     )
     tensor = from_torch(source)
 
-    assert isinstance(tensor, CustomTensor)
+    assert isinstance(tensor, COORMatrix)
     assert tensor.number_of_stored_values == 2
 
 
