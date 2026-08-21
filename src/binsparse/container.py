@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import json
 from typing import Any
+from .dtypes import dtype_to_str, str_to_dtype
 
 
 BINSPARSE_HEADER = "binsparse"
