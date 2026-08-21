@@ -1,29 +1,24 @@
-"""In-memory representations of the Binsparse tensor formats.
-
-Attribute names mirror the descriptor and binary-array names in the spec.
-Array-like objects are typed as ``Any`` so callers may use any backend.
-"""
+"""In-memory representations and container parsing for Binsparse tensors."""
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar
-from .container import BinsparseContainer
 
+import numpy as np
+
+from .container import BinsparseContainer
+from .errors import BinsparseParseError
 from .version import BINSPARSE_VERSION
 
 
 class BinsparseLevel:
-    """Base class for a level in a custom Binsparse format."""
-
     level_desc: ClassVar[str]
 
 
 @dataclass
 class IndexableLevel(BinsparseLevel):
-    """Base class for levels which consume tensor dimensions."""
-
     rank: int
 
     def __post_init__(self) -> None:
@@ -33,8 +28,6 @@ class IndexableLevel(BinsparseLevel):
 
 @dataclass
 class ElementLevel(BinsparseLevel):
-    """A collection of scalar values (a rank-zero terminal level)."""
-
     values: Any
     level_desc: ClassVar[str] = "element"
     rank: ClassVar[int] = 0
@@ -42,8 +35,6 @@ class ElementLevel(BinsparseLevel):
 
 @dataclass
 class ISOElementLevel(BinsparseLevel):
-    """An element level whose logical values are all the same scalar."""
-
     value: Any
     level_desc: ClassVar[str] = "element"
     rank: ClassVar[int] = 0
@@ -55,16 +46,12 @@ class ISOElementLevel(BinsparseLevel):
 
 @dataclass
 class DenseLevel(IndexableLevel):
-    """One or more row-major dense dimensions followed by a sublevel."""
-
     level: BinsparseLevel
     level_desc: ClassVar[str] = "dense"
 
 
 @dataclass
 class SparseLevel(IndexableLevel):
-    """One or more sparse dimensions followed by a sublevel."""
-
     level: BinsparseLevel
     indices: tuple[Any, ...]
     pointers_to_next: Any | None = None
@@ -78,186 +65,136 @@ class SparseLevel(IndexableLevel):
 
 @dataclass
 class BinsparseTensor(ABC):
-    """Metadata shared by every Binsparse tensor representation."""
-
     shape: tuple[int, ...]
     number_of_stored_values: int
     fill: bool | None = None
     fill_value: Any = None
-    data_type: Any = None
-    format: str
+
     version: ClassVar[str] = BINSPARSE_VERSION
+    format: ClassVar[str]
+    buffer_names: ClassVar[tuple[str, ...]] = ()
 
     def __post_init__(self) -> None:
-        if any(dimension < 0 for dimension in self.shape):
-            raise ValueError("shape dimensions must be non-negative")
-        if self.number_of_stored_values < 0:
-            raise ValueError("number_of_stored_values must be non-negative")
+        self.shape = tuple(self.shape)
+        if any(
+            not isinstance(size, int) or isinstance(size, bool) or size < 0
+            for size in self.shape
+        ):
+            raise ValueError("shape dimensions must be non-negative integers")
+        if (
+            not isinstance(self.number_of_stored_values, int)
+            or isinstance(self.number_of_stored_values, bool)
+            or self.number_of_stored_values < 0
+        ):
+            raise ValueError("number_of_stored_values must be a non-negative integer")
+        if self.fill is not None and not isinstance(self.fill, bool):
+            raise ValueError("fill must be a boolean when present")
         if self.fill is not True and self.fill_value is not None:
             raise ValueError("fill_value requires fill=True")
 
     @classmethod
-    def parse(self, f:BinsparseContainer) -> BinsparseTensor:
-        header = f.read_header()
-        self.shape = tuple(header["shape"])
-        self.number_of_stored_values = header["number_of_stored_values"]
-        self.fill = header["fill"]
-        if self.fill:
-            self.fill_value = f.read_buffer("fill_value")[0]
+    def parse(cls, container: BinsparseContainer) -> BinsparseTensor:
+        """Parse a tensor and all required arrays from *container*."""
+        header = container.read_header()
+        required = ("version", "format", "shape", "number_of_stored_values", "data_types")
+        missing = next((key for key in required if key not in header), None)
+        if missing is not None:
+            raise BinsparseParseError(f"missing required descriptor key {missing!r}")
         if header["version"] != BINSPARSE_VERSION:
-            raise BinsparseParseError("Wrong Binsparse Version")
+            raise BinsparseParseError(
+                f"unsupported Binsparse version {header['version']!r}; "
+                f"expected {BINSPARSE_VERSION!r}"
+            )
+        if not isinstance(header["data_types"], dict):
+            raise BinsparseParseError("data_types must be an object")
+        format_name = header["format"]
+        try:
+            tensor_cls = (
+                CustomTensor
+                if format_name == "custom" or cls is CustomTensor
+                else _FORMAT_CLASSES[format_name]
+            )
+        except KeyError as error:
+            raise BinsparseParseError(f"unrecognized format {format_name!r}") from error
+        if cls is not BinsparseTensor and cls is not tensor_cls:
+            raise BinsparseParseError(
+                f"descriptor format {format_name!r} cannot be parsed as {cls.__name__}"
+            )
 
-    def serialize(self, f:BinsparseContainer):
-        if self.fill:
-            f.write_buffer("fill_value", np.full((1,), self.fill_value))
-        f.write_header({
+        common: dict[str, Any] = {
+            "shape": tuple(header["shape"]),
+            "number_of_stored_values": header["number_of_stored_values"],
+            "fill": header.get("fill"),
+        }
+        if common["fill"] is True:
+            fill = container.read_buffer("fill_value")
+            if fill.size != 1:
+                raise BinsparseParseError("fill_value must contain exactly one value")
+            common["fill_value"] = fill.reshape(-1)[0]
+        return tensor_cls._parse(container, header, common)
+
+    @classmethod
+    @abstractmethod
+    def _parse(
+        cls,
+        container: BinsparseContainer,
+        header: dict[str, Any],
+        common: dict[str, Any],
+    ) -> BinsparseTensor:
+        """Parse format-specific data after shared metadata has been parsed."""
+
+    def serialize(self, container: BinsparseContainer) -> None:
+        """Write shared metadata, format-specific data, and the descriptor."""
+        data_types: dict[str, str] = {}
+        header: dict[str, Any] = {
             "version": BINSPARSE_VERSION,
-            "shape": self.shape
-        })
+            "format": self.format,
+            "shape": list(self.shape),
+            "number_of_stored_values": self.number_of_stored_values,
+            "data_types": data_types,
+        }
+        if self.fill is not None:
+            header["fill"] = self.fill
+        if self.fill is True:
+            fill = np.asarray([self.fill_value])
+            data_types["fill_value"] = container.write_buffer("fill_value", fill)
+        header.update(self._serialize(container, data_types))
+        container.write_header(header)
+
+    @abstractmethod
+    def _serialize(
+        self,
+        container: BinsparseContainer,
+        data_types: dict[str, str],
+    ) -> dict[str, Any]:
+        """Write format-specific arrays and return additional descriptor data."""
 
 
-bspread_tensor_lookup = OrderedDict(
-    "DVEC" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "dense",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "element"
-            ),
-        ),
-    ),
-    "DMAT" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "dense",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "dense",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "DMATR" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "dense",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "dense",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "DMATC" => OrderedDict(
-        "transpose" => [1, 0],
-        "level" => OrderedDict(
-            "level_desc" => "dense",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "dense",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "CVEC" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "sparse",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "element"
-            ),
-        ),
-    ),
-    "CSR" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "dense",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "sparse",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "CSC" => OrderedDict(
-        "transpose" => [1, 0],
-        "level" => OrderedDict(
-            "level_desc" => "dense",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "sparse",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "DCSR" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "sparse",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "sparse",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "DCSC" => OrderedDict(
-        "transpose" => [1, 0],
-        "level" => OrderedDict(
-            "level_desc" => "sparse",
-            "rank" => 1,
-            "level" => OrderedDict(
-                "level_desc" => "sparse",
-                "rank" => 1,
-                "level" => OrderedDict(
-                    "level_desc" => "element"
-                ),
-            ),
-        ),
-    ),
-    "COO" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "sparse",
-            "rank" => 2,
-            "level" => OrderedDict(
-                "level_desc" => "element"
-            ),
-        ),
-    ),
-    "COOR" => OrderedDict(
-        "level" => OrderedDict(
-            "level_desc" => "sparse",
-            "rank" => 2,
-            "level" => OrderedDict(
-                "level_desc" => "element"
-            ),
-        ),
-    ),
-    "COOC" => OrderedDict(
-        "transpose" => [1, 0],
-        "level" => OrderedDict(
-            "level_desc" => "sparse",
-            "rank" => 2,
-            "level" => OrderedDict(
-                "level_desc" => "element"
-            ),
-        ),
-    ),
-)
+class _PredefinedTensor(BinsparseTensor):
+    @classmethod
+    def _parse(
+        cls,
+        container: BinsparseContainer,
+        header: dict[str, Any],
+        common: dict[str, Any],
+    ) -> BinsparseTensor:
+        buffers: dict[str, Any] = {
+            name: container.read_buffer(name) for name in cls.buffer_names
+        }
+        return cls(**common, **buffers)
+
+    def _serialize(
+        self,
+        container: BinsparseContainer,
+        data_types: dict[str, str],
+    ) -> dict[str, Any]:
+        for name in self.buffer_names:
+            value = getattr(self, name)
+            if value is None:
+                raise ValueError(f"required buffer {name!r} is missing")
+            data_types[name] = container.write_buffer(name, np.asarray(value))
+        return {}
+
 
 @dataclass
 class CustomTensor(BinsparseTensor):
@@ -273,138 +210,255 @@ class CustomTensor(BinsparseTensor):
             dimensions = set(range(len(self.shape)))
             if len(self.transpose) != len(self.shape) or set(self.transpose) != dimensions:
                 raise ValueError("transpose must be a permutation of the dimensions")
+        if self._level_rank(self.level) != len(self.shape):
+            raise ValueError("custom levels must consume exactly the tensor rank")
 
-    def parse_level(self, f, fmt, depth):
-        match fmt["level_desc"]:
-            case "dense":
-                rank = fmt["rank"]
-                level = self.parse_level(f, fmt["level"], depth + rank)
-                return DenseLevel(rank, level)
-            case "sparse":
-                rank = fmt["rank"]
-                if depth == 0:
-                    pointers_to_next = None
-                else:
-                    pointers_to_next = f.read_buffer(fmt[f"pointers_to_{depth}"])
-                indices = [f.read_buffer(fmt[f"indices_{depth + r}"]) for r in range(rank)]
-                level = self.parse_level(f, fmt["level"], depth + rank)
-                return SparseLevel(rank, level, indices, pointers_to_next)
-            case "element":
-                values = f.read_buffer("values")
-                return ElementLevel(values)
-            case desc:
-                raise BinsparseParseError(f"unrecognized level descriptor \"{desc}\"")
-
-    def serialize_level(self, f, level, depth):
-        match level:
-            case DenseLevel(rank, level):
-                format = self.serialize_level(f, level, depth)
-                return {
-                    "level_desc": "dense",
-                    "rank": rank,
-                    "level": format
-                }
-            case 
-                
-
-
+    @staticmethod
+    def _level_rank(level: BinsparseLevel) -> int:
+        if isinstance(level, (ElementLevel, ISOElementLevel)):
+            return 0
+        if isinstance(level, (DenseLevel, SparseLevel)):
+            return level.rank + CustomTensor._level_rank(level.level)
+        raise TypeError(f"unsupported level type {type(level).__name__}")
 
     @classmethod
-    def parse(self, f:BinsparseContainer):
-        super(self).parse()
-        header = f.get_header()
-        if header["format"] == "custom":
-            BinsparseLevel.parse_level(f, header["custom"], 0)
+    def _parse(
+        cls,
+        container: BinsparseContainer,
+        header: dict[str, Any],
+        common: dict[str, Any],
+    ) -> BinsparseTensor:
+        format_name = header["format"]
+        if format_name == "custom":
+            try:
+                custom = header["custom"]
+                descriptor = custom["level"]
+            except (KeyError, TypeError) as error:
+                raise BinsparseParseError("custom format requires custom.level") from error
+            transpose = custom.get("transpose")
         else:
-            BinsparseLevel.parse_level(f, bspread_tensor_lookup[header["format"]], 0)
-        
-        
+            try:
+                descriptor, transpose = _PREDEFINED_LEVELS[format_name]
+            except KeyError as error:
+                raise BinsparseParseError(f"unrecognized format {format_name!r}") from error
+        level = cls._parse_level(container, header, descriptor, 0)
+        return cls(
+            **common,
+            level=level,
+            transpose=None if transpose is None else tuple(transpose),
+        )
 
+    @staticmethod
+    def _parse_level(
+        container: BinsparseContainer,
+        header: dict[str, Any],
+        descriptor: dict[str, Any],
+        depth: int,
+    ) -> BinsparseLevel:
+        try:
+            level_desc = descriptor["level_desc"]
+        except (KeyError, TypeError) as error:
+            raise BinsparseParseError("each custom level requires level_desc") from error
+        if level_desc == "element":
+            values = container.read_buffer("values")
+            array = np.asarray(values)
+            if array.ndim == 1 and array.strides == (0,):
+                return ISOElementLevel(array[0])
+            return ElementLevel(values)
+        if level_desc not in {"dense", "sparse"}:
+            raise BinsparseParseError(f"unrecognized level descriptor {level_desc!r}")
+        try:
+            rank = descriptor["rank"]
+            child_descriptor = descriptor["level"]
+        except KeyError as error:
+            raise BinsparseParseError(f"{level_desc} level requires {error.args[0]!r}") from error
+        if not isinstance(rank, int) or isinstance(rank, bool) or rank < 1:
+            raise BinsparseParseError(f"{level_desc} level rank must be >= 1")
+        child = CustomTensor._parse_level(container, header, child_descriptor, depth + rank)
+        if level_desc == "dense":
+            return DenseLevel(rank, child)
+        pointers = None if depth == 0 else container.read_buffer(f"pointers_to_{depth}")
+        indices = tuple(
+            container.read_buffer(f"indices_{dimension}")
+            for dimension in range(depth, depth + rank)
+        )
+        return SparseLevel(rank, child, indices, pointers)
 
+    def _serialize(
+        self,
+        container: BinsparseContainer,
+        data_types: dict[str, str],
+    ) -> dict[str, Any]:
+        descriptor = self._serialize_level(container, self.level, 0, data_types)
+        custom: dict[str, Any] = {"level": descriptor}
+        if self.transpose is not None:
+            custom["transpose"] = list(self.transpose)
+        result: dict[str, Any] = {"custom": custom}
+        for alias, (alias_descriptor, alias_transpose) in _PREDEFINED_LEVELS.items():
+            if descriptor == alias_descriptor and self.transpose == alias_transpose:
+                result["format"] = alias
+                break
+        return result
+
+    @staticmethod
+    def _serialize_level(
+        container: BinsparseContainer,
+        level: BinsparseLevel | None,
+        depth: int,
+        data_types: dict[str, str],
+    ) -> dict[str, Any]:
+        if isinstance(level, ISOElementLevel):
+            value = np.asarray([level.value])
+            values = np.broadcast_to(value, (1,))
+            data_types["values"] = container.write_buffer("values", values)
+            return {"level_desc": "element"}
+        if isinstance(level, ElementLevel):
+            values = np.asarray(level.values)
+            data_types["values"] = container.write_buffer("values", values)
+            return {"level_desc": "element"}
+        if isinstance(level, DenseLevel):
+            child = CustomTensor._serialize_level(
+                container, level.level, depth + level.rank, data_types
+            )
+            return {"level_desc": "dense", "rank": level.rank, "level": child}
+        if isinstance(level, SparseLevel):
+            if depth > 0:
+                if level.pointers_to_next is None:
+                    raise ValueError(f"sparse level at depth {depth} requires pointers")
+                name = f"pointers_to_{depth}"
+                pointers = np.asarray(level.pointers_to_next)
+                data_types[name] = container.write_buffer(name, pointers)
+            for offset, indices in enumerate(level.indices):
+                name = f"indices_{depth + offset}"
+                data_types[name] = container.write_buffer(name, np.asarray(indices))
+            child = CustomTensor._serialize_level(
+                container, level.level, depth + level.rank, data_types
+            )
+            return {"level_desc": "sparse", "rank": level.rank, "level": child}
+        raise TypeError(f"unsupported level type {type(level).__name__}")
 
 
 @dataclass
-class DVECVector(BinsparseTensor):
+class DVECVector(_PredefinedTensor):
     values: Any = None
     format: ClassVar[str] = "DVEC"
+    buffer_names: ClassVar[tuple[str, ...]] = ("values",)
 
-    def parse(self, f):
-        super.parse()
-        self.values = f.read_buffer("values")
 
 @dataclass
-class DMATRMatrix(BinsparseTensor):
+class DMATRMatrix(_PredefinedTensor):
     values: Any = None
     format: ClassVar[str] = "DMATR"
+    buffer_names: ClassVar[tuple[str, ...]] = ("values",)
 
 
 @dataclass
-class DMATCMatrix(BinsparseTensor):
+class DMATCMatrix(_PredefinedTensor):
     values: Any = None
     format: ClassVar[str] = "DMATC"
+    buffer_names: ClassVar[tuple[str, ...]] = ("values",)
 
 
 DMATMatrix = DMATRMatrix
 
 
 @dataclass
-class CVECVector(BinsparseTensor):
+class CVECVector(_PredefinedTensor):
     indices_0: Any = None
     values: Any = None
     format: ClassVar[str] = "CVEC"
+    buffer_names: ClassVar[tuple[str, ...]] = ("indices_0", "values")
 
 
 @dataclass
-class CSRMatrix(BinsparseTensor):
+class CSRMatrix(_PredefinedTensor):
     pointers_to_1: Any = None
     indices_1: Any = None
     values: Any = None
     format: ClassVar[str] = "CSR"
+    buffer_names: ClassVar[tuple[str, ...]] = ("pointers_to_1", "indices_1", "values")
 
 
 @dataclass
-class CSCMatrix(BinsparseTensor):
-    pointers_to_1: Any = None
-    indices_1: Any = None
-    values: Any = None
+class CSCMatrix(CSRMatrix):
     format: ClassVar[str] = "CSC"
 
 
 @dataclass
-class DCSRMatrix(BinsparseTensor):
+class DCSRMatrix(_PredefinedTensor):
     indices_0: Any = None
     pointers_to_1: Any = None
     indices_1: Any = None
     values: Any = None
     format: ClassVar[str] = "DCSR"
+    buffer_names: ClassVar[tuple[str, ...]] = (
+        "indices_0", "pointers_to_1", "indices_1", "values"
+    )
 
 
 @dataclass
-class DCSCMatrix(BinsparseTensor):
-    indices_0: Any = None
-    pointers_to_1: Any = None
-    indices_1: Any = None
-    values: Any = None
+class DCSCMatrix(DCSRMatrix):
     format: ClassVar[str] = "DCSC"
 
 
 @dataclass
-class COORMatrix(BinsparseTensor):
+class COORMatrix(_PredefinedTensor):
     indices_0: Any = None
     indices_1: Any = None
     values: Any = None
     format: ClassVar[str] = "COOR"
+    buffer_names: ClassVar[tuple[str, ...]] = ("indices_0", "indices_1", "values")
 
 
 @dataclass
-class COOCMatrix(BinsparseTensor):
-    indices_0: Any = None
-    indices_1: Any = None
-    values: Any = None
+class COOCMatrix(COORMatrix):
     format: ClassVar[str] = "COOC"
 
 
 COOMatrix = COORMatrix
+
+
+_FORMAT_CLASSES: dict[str, type[BinsparseTensor]] = {
+    "DVEC": DVECVector,
+    "DMAT": DMATRMatrix,
+    "DMATR": DMATRMatrix,
+    "DMATC": DMATCMatrix,
+    "CVEC": CVECVector,
+    "CSR": CSRMatrix,
+    "CSC": CSCMatrix,
+    "DCSR": DCSRMatrix,
+    "DCSC": DCSCMatrix,
+    "COO": COORMatrix,
+    "COOR": COORMatrix,
+    "COOC": COOCMatrix,
+}
+
+
+_ELEMENT = {"level_desc": "element"}
+
+
+def _dense(level: dict[str, Any], rank: int = 1) -> dict[str, Any]:
+    return {"level_desc": "dense", "rank": rank, "level": level}
+
+
+def _sparse(level: dict[str, Any], rank: int = 1) -> dict[str, Any]:
+    return {"level_desc": "sparse", "rank": rank, "level": level}
+
+
+_PREDEFINED_LEVELS: dict[str, tuple[dict[str, Any], tuple[int, ...] | None]] = {
+    "DVEC": (_dense(_ELEMENT), None),
+    "DMATR": (_dense(_dense(_ELEMENT)), None),
+    "DMAT": (_dense(_dense(_ELEMENT)), None),
+    "DMATC": (_dense(_dense(_ELEMENT)), (1, 0)),
+    "CVEC": (_sparse(_ELEMENT), None),
+    "CSR": (_dense(_sparse(_ELEMENT)), None),
+    "CSC": (_dense(_sparse(_ELEMENT)), (1, 0)),
+    "DCSR": (_sparse(_sparse(_ELEMENT)), None),
+    "DCSC": (_sparse(_sparse(_ELEMENT)), (1, 0)),
+    "COOR": (_sparse(_ELEMENT, 2), None),
+    "COO": (_sparse(_ELEMENT, 2), None),
+    "COOC": (_sparse(_ELEMENT, 2), (1, 0)),
+}
 
 
 __all__ = [

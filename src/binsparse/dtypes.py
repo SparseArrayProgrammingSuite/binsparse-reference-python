@@ -1,3 +1,8 @@
+"""Mappings between NumPy and Binsparse primitive data types."""
+
+import numpy as np
+
+
 dtype_to_str = {
     np.dtype("int8"): "int8",
     np.dtype("int16"): "int16",
@@ -12,7 +17,7 @@ dtype_to_str = {
     np.dtype("bool"): "bint8",
 }
 
-str_to_dtype = {val:key for key, val in dtype_to_str.items()}
+str_to_dtype = {value: key for key, value in dtype_to_str.items()}
 
 __all__ = [
     "dtype_to_str",
