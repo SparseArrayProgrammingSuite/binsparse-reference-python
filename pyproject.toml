@@ -6,8 +6,13 @@ version = "0.1.0"
 dependencies = [
     "h5py>=3.16.0,<4",
     "numpy>=2.5.2,<3",
-    "dlpack>=0.1,<0.2",
 ]
+
+[project.optional-dependencies]
+scipy = ["scipy"]
+torch = ["torch"]
+sparse = ["sparse"]
+conversions = ["scipy", "torch", "sparse"]
 
 [dependency-groups]
 test = [

@@ -85,6 +85,11 @@ class BinsparseTensor(ABC):
                 f"expected {BINSPARSE_VERSION!r}"
             )
         format_name = header["format"]
+        requested_format = getattr(cls, "format", format_name)
+        if requested_format != format_name:
+            raise BinsparseParseError(
+                f"descriptor format {format_name!r} cannot be parsed as {cls.__name__}"
+            )
         try:
             tensor_cls = cls if hasattr(cls, "format") else _FORMAT_CLASSES[format_name]
         except KeyError as error:
