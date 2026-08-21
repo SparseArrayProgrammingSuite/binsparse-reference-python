@@ -1,5 +1,7 @@
 import numpy as np
+import pytest
 from binsparse.container import NPZBinsparseContainer
+from binsparse.errors import BinsparseParseError
 from binsparse.tensor import (
     BinsparseTensor,
     CSRMatrix,
@@ -121,3 +123,6 @@ def test_nested_iso_complex_buffer_round_trip() -> None:
     assert isinstance(parsed, DVECVector)
     assert parsed.values.strides == (0,)
     np.testing.assert_array_equal(parsed.values, values)
+
+    with pytest.raises(BinsparseParseError, match="expected_size is required"):
+        container.read_buffer("values")

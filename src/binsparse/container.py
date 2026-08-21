@@ -61,7 +61,7 @@ class BinsparseContainer(ABC):
     def _write_header(self, value: dict[str, Any]) -> None:
         """Write a validated Binsparse header to the backend."""
 
-    def read_buffer(self, key: str) -> np.ndarray:
+    def read_buffer(self, key: str, expected_size: int | None = None) -> np.ndarray:
         """Read and decode a named binary array."""
         header = self.read_header()
         try:
@@ -72,12 +72,14 @@ class BinsparseContainer(ABC):
             raise BinsparseParseError(f"data type for buffer {key!r} must be a string")
         def decode(data_type: str, data: np.ndarray) -> np.ndarray:
             if (match := re.fullmatch(r"iso\[(.*)\]", data_type)) is not None:
+                if expected_size is None:
+                    raise BinsparseParseError(
+                        "expected_size is required when reading an ISO buffer"
+                    )
                 decoded = decode(match.group(1), data)
                 if decoded.size != 1:
                     raise BinsparseParseError("an ISO buffer must contain one value")
-                return np.broadcast_to(
-                    decoded.reshape(1), (header["number_of_stored_values"],)
-                )
+                return np.broadcast_to(decoded.reshape(1), (expected_size,))
             if (match := re.fullmatch(r"complex\[(.*)\]", data_type)) is not None:
                 decoded = decode(match.group(1), data)
                 if decoded.dtype not in {np.dtype("float32"), np.dtype("float64")}:
@@ -95,7 +97,12 @@ class BinsparseContainer(ABC):
             except KeyError as error:
                 raise BinsparseParseError(f"unknown Binsparse type {data_type!r}") from error
             return np.asarray(data, dtype=dtype)  # type: ignore[call-overload]
-        return decode(declared, self._read_buffer(key))
+        data = decode(declared, self._read_buffer(key))
+        if expected_size is not None and data.size != expected_size:
+            raise BinsparseParseError(
+                f"buffer {key!r} has size {data.size}, expected {expected_size}"
+            )
+        return data
 
     @abstractmethod
     def _read_buffer(self, key: str) -> np.ndarray:

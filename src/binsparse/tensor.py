@@ -103,7 +103,7 @@ class BinsparseTensor(ABC):
             "fill": header.get("fill"),
         }
         if common["fill"] is True:
-            fill = container.read_buffer("fill_value")
+            fill = container.read_buffer("fill_value", 1)
             if fill.size != 1:
                 raise BinsparseParseError("fill_value must contain exactly one value")
             common["fill_value"] = fill.reshape(-1)[0]
@@ -187,11 +187,12 @@ class CustomTensor(BinsparseTensor):
                 descriptor, transpose = _PREDEFINED_LEVELS[format_name]
             except KeyError as error:
                 raise BinsparseParseError(f"unrecognized format {format_name!r}") from error
+        transpose_tuple = None if transpose is None else tuple(transpose)
         level = cls._parse_level(container, header, descriptor, 0)
         return cls(
             **common,
             level=level,
-            transpose=None if transpose is None else tuple(transpose),
+            transpose=transpose_tuple,
         )
 
     @staticmethod
@@ -207,23 +208,35 @@ class CustomTensor(BinsparseTensor):
             raise BinsparseParseError("each custom level requires level_desc") from error
         match level_desc:
             case "element":
-                return ElementLevel(container.read_buffer("values"))
-            #one case for dense, one for sparse. 
-            case "dense" | "sparse":
+                count = header["number_of_stored_values"]
+                return ElementLevel(container.read_buffer("values", count))
+            case "dense":
                 try:
                     rank = descriptor["rank"]
                     child_descriptor = descriptor["level"]
                 except KeyError as error:
                     raise BinsparseParseError(
-                        f"{level_desc} level requires {error.args[0]!r}"
+                        f"dense level requires {error.args[0]!r}"
                     ) from error
                 if rank < 1:
-                    raise BinsparseParseError(f"{level_desc} level rank must be >= 1")
+                    raise BinsparseParseError("dense level rank must be >= 1")
                 child = CustomTensor._parse_level(
-                    container, header, child_descriptor, depth + rank
+                    container,
+                    header,
+                    child_descriptor,
+                    depth + rank,
                 )
-                if level_desc == "dense":
-                    return DenseLevel(rank, child)
+                return DenseLevel(rank, child)
+            case "sparse":
+                try:
+                    rank = descriptor["rank"]
+                    child_descriptor = descriptor["level"]
+                except KeyError as error:
+                    raise BinsparseParseError(
+                        f"sparse level requires {error.args[0]!r}"
+                    ) from error
+                if rank < 1:
+                    raise BinsparseParseError("sparse level rank must be >= 1")
                 pointers = (
                     None
                     if depth == 0
@@ -232,6 +245,12 @@ class CustomTensor(BinsparseTensor):
                 indices = tuple(
                     container.read_buffer(f"indices_{dimension}")
                     for dimension in range(depth, depth + rank)
+                )
+                child = CustomTensor._parse_level(
+                    container,
+                    header,
+                    child_descriptor,
+                    depth + rank,
                 )
                 return SparseLevel(rank, child, indices, pointers)
             case _:
@@ -295,7 +314,8 @@ class DVECVector(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
-        return cls(**common, values=container.read_buffer("values"))
+        count = common["number_of_stored_values"]
+        return cls(**common, values=container.read_buffer("values", count))
 
     def _serialize(self, container):
         container.write_buffer("values", np.asarray(self.values))
@@ -309,7 +329,8 @@ class DMATRMatrix(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
-        return cls(**common, values=container.read_buffer("values"))
+        count = common["number_of_stored_values"]
+        return cls(**common, values=container.read_buffer("values", count))
 
     def _serialize(self, container):
         container.write_buffer("values", np.asarray(self.values))
@@ -323,7 +344,8 @@ class DMATCMatrix(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
-        return cls(**common, values=container.read_buffer("values"))
+        count = common["number_of_stored_values"]
+        return cls(**common, values=container.read_buffer("values", count))
 
     def _serialize(self, container):
         container.write_buffer("values", np.asarray(self.values))
@@ -341,10 +363,11 @@ class CVECVector(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
+        count = common["number_of_stored_values"]
         return cls(
             **common,
             indices_0=container.read_buffer("indices_0"),
-            values=container.read_buffer("values"),
+            values=container.read_buffer("values", count),
         )
 
     def _serialize(self, container):
@@ -362,11 +385,12 @@ class CSRMatrix(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
+        count = common["number_of_stored_values"]
         return cls(
             **common,
             pointers_to_1=container.read_buffer("pointers_to_1"),
             indices_1=container.read_buffer("indices_1"),
-            values=container.read_buffer("values"),
+            values=container.read_buffer("values", count),
         )
 
     def _serialize(self, container):
@@ -391,12 +415,14 @@ class DCSRMatrix(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
+        count = common["number_of_stored_values"]
+        indices_0 = container.read_buffer("indices_0")
         return cls(
             **common,
-            indices_0=container.read_buffer("indices_0"),
+            indices_0=indices_0,
             pointers_to_1=container.read_buffer("pointers_to_1"),
             indices_1=container.read_buffer("indices_1"),
-            values=container.read_buffer("values"),
+            values=container.read_buffer("values", count),
         )
 
     def _serialize(self, container):
@@ -421,11 +447,12 @@ class COORMatrix(BinsparseTensor):
 
     @classmethod
     def _parse(cls, container, header, common):
+        count = common["number_of_stored_values"]
         return cls(
             **common,
             indices_0=container.read_buffer("indices_0"),
             indices_1=container.read_buffer("indices_1"),
-            values=container.read_buffer("values"),
+            values=container.read_buffer("values", count),
         )
 
     def _serialize(self, container):
