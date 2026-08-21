@@ -6,7 +6,7 @@ from binsparse.tensor import (
     CustomTensor,
     DenseLevel,
     DVECVector,
-    ISOElementLevel,
+    ElementLevel,
     SparseLevel,
 )
 
@@ -62,7 +62,9 @@ def test_iso_parse_uses_zero_stride_array() -> None:
             1,
             SparseLevel(
                 1,
-                ISOElementLevel(np.int8(7)),
+                ElementLevel(
+                    np.broadcast_to(np.array([7], dtype=np.int8), (2,))
+                ),
                 (np.array([1, 3], dtype=np.uint16),),
                 np.array([0, 0, 1, 2], dtype=np.uint64),
             ),
@@ -81,8 +83,9 @@ def test_iso_parse_uses_zero_stride_array() -> None:
     assert isinstance(custom, CustomTensor)
     assert isinstance(custom.level, DenseLevel)
     assert isinstance(custom.level.level, SparseLevel)
-    assert isinstance(custom.level.level.level, ISOElementLevel)
-    assert custom.level.level.level.value == 7
+    assert isinstance(custom.level.level.level, ElementLevel)
+    assert custom.level.level.level.values.strides == (0,)
+    np.testing.assert_array_equal(custom.level.level.level.values, [7, 7])
 
 
 def test_complex_buffer_is_decoded_by_container_layer() -> None:

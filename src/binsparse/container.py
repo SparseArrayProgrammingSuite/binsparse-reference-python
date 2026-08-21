@@ -10,7 +10,6 @@ from typing import Any
 
 import numpy as np
 
-from .dtypes import dtype_to_str, str_to_dtype
 from .errors import BinsparseParseError
 
 
