@@ -35,22 +35,20 @@ def _encode_json(value: dict[str, Any]) -> str:
 class BinsparseFile(ABC):
     """Common interface to a Binsparse binary container or container group."""
 
-    @property
     @abstractmethod
-    def header(self) -> dict[str, Any]:
+    def read_header(self) -> dict[str, Any]:
         """Return the decoded Binsparse JSON descriptor."""
 
-    @header.setter
     @abstractmethod
-    def header(self, value: dict[str, Any]) -> None:
+    def write_header(self, value: dict[str, Any]) -> None:
         """Store a Binsparse JSON descriptor."""
 
     @abstractmethod
-    def __getitem__(self, key: str) -> Any:
+    def read_buffer(self, key: str) -> Any:
         """Read and materialize a named binary array."""
 
     @abstractmethod
-    def __setitem__(self, key: str, value: Any) -> None:
+    def write_buffer(self, key: str, value: Any) -> None:
         """Create or replace a named binary array."""
 
     @abstractmethod
@@ -74,22 +72,20 @@ class HDF5BinsparseFile(BinsparseFile):
     def __init__(self, group: Any):
         self.group = group
 
-    @property
-    def header(self) -> dict[str, Any]:
+    def read_header(self) -> dict[str, Any]:
         try:
             value = self.group.attrs[BINSPARSE_HEADER]
         except KeyError as error:
             raise KeyError("HDF5 group has no 'binsparse' attribute") from error
         return _decode_json(value)
 
-    @header.setter
-    def header(self, value: dict[str, Any]) -> None:
+    def write_header(self, value: dict[str, Any]) -> None:
         self.group.attrs[BINSPARSE_HEADER] = _encode_json(value)
 
-    def __getitem__(self, key: str) -> Any:
+    def read_buffer(self, key: str) -> Any:
         return self.group[key][()]
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def write_buffer(self, key: str, value: Any) -> None:
         if key in self.group:
             del self.group[key]
         self.group.create_dataset(key, data=value)
@@ -108,23 +104,21 @@ class ZarrBinsparseFile(BinsparseFile):
     def __init__(self, group: Any):
         self.group = group
 
-    @property
-    def header(self) -> dict[str, Any]:
+    def read_header(self) -> dict[str, Any]:
         try:
             value = self.group.attrs[BINSPARSE_HEADER]
         except KeyError as error:
             raise KeyError("Zarr group has no 'binsparse' attribute") from error
         return _decode_json(value)
 
-    @header.setter
-    def header(self, value: dict[str, Any]) -> None:
+    def write_header(self, value: dict[str, Any]) -> None:
         _encode_json(value)  # Validate shape and JSON serializability.
         self.group.attrs[BINSPARSE_HEADER] = value
 
-    def __getitem__(self, key: str) -> Any:
+    def read_buffer(self, key: str) -> Any:
         return self.group[key][...]
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def write_buffer(self, key: str, value: Any) -> None:
         if key in self.group:
             del self.group[key]
         if hasattr(self.group, "create_array"):
@@ -181,8 +175,7 @@ class NPZBinsparseFile(BinsparseFile):
                     self.archive = {key: loaded[key] for key in loaded.files}
                     loaded.close()
 
-    @property
-    def header(self) -> dict[str, Any]:
+    def read_header(self) -> dict[str, Any]:
         self._require_open()
         try:
             value = self.archive[BINSPARSE_HEADER]
@@ -190,21 +183,20 @@ class NPZBinsparseFile(BinsparseFile):
             raise KeyError("NPZ archive has no 'binsparse' entry") from error
         return _decode_json(value)
 
-    @header.setter
-    def header(self, value: dict[str, Any]) -> None:
+    def write_header(self, value: dict[str, Any]) -> None:
         self._require_open_and_writable()
         self.archive[BINSPARSE_HEADER] = _encode_json(value)
         self._dirty = True
 
-    def __getitem__(self, key: str) -> Any:
+    def read_buffer(self, key: str) -> Any:
         self._require_open()
         if key == BINSPARSE_HEADER:
-            raise KeyError("use the 'header' property to access binsparse metadata")
+            raise KeyError("use read_header() to access binsparse metadata")
         return self.archive[key]
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    def write_buffer(self, key: str, value: Any) -> None:
         if key == BINSPARSE_HEADER:
-            raise KeyError("use the 'header' property to set binsparse metadata")
+            raise KeyError("use write_header() to set binsparse metadata")
         self._require_open_and_writable()
         self.archive[key] = value
         self._dirty = True
