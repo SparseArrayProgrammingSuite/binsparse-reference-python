@@ -37,7 +37,7 @@ def test_csr_round_trip() -> None:
     np.testing.assert_array_equal(parsed.values, original.values)
 
 
-def test_predefined_format_parses_as_custom() -> None:
+def test_explicit_format_requires_exact_match() -> None:
     archive: dict[str, np.ndarray] = {}
     tensor = CSRMatrix(
         (2, 3),
@@ -48,11 +48,8 @@ def test_predefined_format_parses_as_custom() -> None:
     )
     container = NPZBinsparseContainer(archive)
     tensor.serialize(container)
-    parsed = CustomTensor.parse(container)
-
-    assert isinstance(parsed, CustomTensor)
-    assert isinstance(parsed.level, DenseLevel)
-    assert isinstance(parsed.level.level, SparseLevel)
+    with pytest.raises(BinsparseParseError):
+        CustomTensor.parse(container)
 
 
 def test_iso_parse_uses_zero_stride_array() -> None:
@@ -76,18 +73,13 @@ def test_iso_parse_uses_zero_stride_array() -> None:
     tensor.serialize(container)
     assert container.read_header()["format"] == "CSR"
     parsed = BinsparseTensor.parse(container)
-    custom = CustomTensor.parse(container)
 
     assert isinstance(parsed, CSRMatrix)
     assert parsed.values.shape == (2,)
     assert parsed.values.strides == (0,)
     np.testing.assert_array_equal(parsed.values, [7, 7])
-    assert isinstance(custom, CustomTensor)
-    assert isinstance(custom.level, DenseLevel)
-    assert isinstance(custom.level.level, SparseLevel)
-    assert isinstance(custom.level.level.level, ElementLevel)
-    assert custom.level.level.level.values.strides == (0,)
-    np.testing.assert_array_equal(custom.level.level.level.values, [7, 7])
+    with pytest.raises(BinsparseParseError):
+        CustomTensor.parse(container)
 
 
 def test_complex_buffer_is_decoded_by_container_layer() -> None:
