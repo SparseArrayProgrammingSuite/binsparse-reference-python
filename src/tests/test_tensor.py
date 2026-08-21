@@ -52,6 +52,7 @@ def test_predefined_format_parses_as_custom(tmp_path: Path) -> None:
     with NPZBinsparseContainer(path) as container:
         parsed = CustomTensor.parse(container)
 
+    assert isinstance(parsed, CustomTensor)
     assert isinstance(parsed.level, DenseLevel)
     assert isinstance(parsed.level.level, SparseLevel)
 
@@ -82,6 +83,9 @@ def test_iso_parse_uses_zero_stride_array(tmp_path: Path) -> None:
     assert parsed.values.shape == (2,)
     assert parsed.values.strides == (0,)
     np.testing.assert_array_equal(parsed.values, [7, 7])
+    assert isinstance(custom, CustomTensor)
+    assert isinstance(custom.level, DenseLevel)
+    assert isinstance(custom.level.level, SparseLevel)
     assert isinstance(custom.level.level.level, ISOElementLevel)
     assert custom.level.level.level.value == 7
 
@@ -103,3 +107,21 @@ def test_complex_buffer_is_decoded_by_container_layer(tmp_path: Path) -> None:
     np.testing.assert_array_equal(
         parsed.values, np.array([1 + 2j, 3 + 4j], dtype=np.complex64)
     )
+
+
+def test_nested_iso_complex_buffer_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "iso-complex.npz"
+    values = np.broadcast_to(np.array([1 + 2j], dtype=np.complex64), (3,))
+    original = DVECVector((3,), 3, values=values)
+
+    with NPZBinsparseContainer(path, "w") as container:
+        original.serialize(container)
+        assert container.read_header()["data_types"]["values"] == (
+            "iso[complex[float32]]"
+        )
+    with NPZBinsparseContainer(path) as container:
+        parsed = BinsparseTensor.parse(container)
+
+    assert isinstance(parsed, DVECVector)
+    assert parsed.values.strides == (0,)
+    np.testing.assert_array_equal(parsed.values, values)

@@ -21,23 +21,11 @@ class BinsparseContainer(ABC):
 
     def read_header(self) -> dict[str, Any]:
         """Return the decoded Binsparse JSON descriptor."""
-        value = self._read_header()
-        if hasattr(value, "item"):
-            try:
-                value = value.item()
-            except ValueError:
-                pass
-        if isinstance(value, bytes):
-            value = value.decode("utf-8")
-        if isinstance(value, str):
-            value = json.loads(value)
-        if not isinstance(value, dict):
-            raise TypeError("the binsparse header must be a JSON object")
-        return value
+        return self._read_header()
 
     @abstractmethod
-    def _read_header(self) -> Any:
-        """Read the raw Binsparse header from the backend."""
+    def _read_header(self) -> dict[str, Any]:
+        """Read and decode the Binsparse header from the backend."""
 
     def write_header(self, value: dict[str, Any]) -> None:
         """Store a Binsparse JSON descriptor."""
@@ -59,27 +47,32 @@ class BinsparseContainer(ABC):
             raise BinsparseParseError(f"missing data type for buffer {key!r}") from error
         if not isinstance(declared, str):
             raise BinsparseParseError(f"data type for buffer {key!r} must be a string")
-        match = re.fullmatch(r"(?:(iso|complex)\[([^\[\]]+)\]|([^\[\]]+))", declared)
-        if match is None:
-            raise BinsparseParseError(f"unknown Binsparse type wrapper {declared!r}")
-        modifier, wrapped_type, plain_type = match.groups()
-        primitive = wrapped_type or plain_type
-        try:
-            dtype = str_to_dtype[primitive]
-        except KeyError as error:
-            raise BinsparseParseError(f"unknown Binsparse type {primitive!r}") from error
-
-        data = np.asarray(self._read_buffer(key), dtype=dtype)  # type: ignore[call-overload]
-        if modifier == "iso":
-            if data.size != 1:
-                raise BinsparseParseError("an ISO buffer must contain exactly one value")
-            return np.broadcast_to(data.reshape(1), (header["number_of_stored_values"],))
-        if modifier == "complex":
-            if primitive not in {"float32", "float64"} or data.ndim != 1 or data.size % 2:
-                raise BinsparseParseError("invalid complex value buffer")
-            dtype = np.complex64 if data.dtype == np.float32 else np.complex128
-            return np.ascontiguousarray(data).view(dtype)
-        return data
+        def decode(data_type: str, data: np.ndarray) -> np.ndarray:
+            if (match := re.fullmatch(r"iso\[(.*)\]", data_type)) is not None:
+                decoded = decode(match.group(1), data)
+                if decoded.size != 1:
+                    raise BinsparseParseError("an ISO buffer must contain one value")
+                return np.broadcast_to(
+                    decoded.reshape(1), (header["number_of_stored_values"],)
+                )
+            if (match := re.fullmatch(r"complex\[(.*)\]", data_type)) is not None:
+                decoded = decode(match.group(1), data)
+                if decoded.dtype not in {np.dtype("float32"), np.dtype("float64")}:
+                    raise BinsparseParseError("complex values require float32 or float64")
+                if decoded.ndim != 1 or decoded.size % 2 != 0:
+                    raise BinsparseParseError("invalid complex value buffer")
+                complex_dtype = (
+                    np.complex64 if decoded.dtype == np.float32 else np.complex128
+                )
+                return np.ascontiguousarray(decoded).view(complex_dtype)
+            if re.fullmatch(r"[^\[\]]+", data_type) is None:
+                raise BinsparseParseError(f"unknown Binsparse type wrapper {data_type!r}")
+            try:
+                dtype = str_to_dtype[data_type]
+            except KeyError as error:
+                raise BinsparseParseError(f"unknown Binsparse type {data_type!r}") from error
+            return np.asarray(data, dtype=dtype)  # type: ignore[call-overload]
+        return decode(declared, self._read_buffer(key))
 
     @abstractmethod
     def _read_buffer(self, key: str) -> np.ndarray:
@@ -91,26 +84,24 @@ class BinsparseContainer(ABC):
         value: np.ndarray,
     ) -> str:
         """Encode, create or replace a named array, returning its data type."""
-        data = np.asarray(value)
-        if data.ndim == 1 and data.strides == (0,):
-            if data.size == 0:
-                raise ValueError("cannot encode an empty ISO buffer")
-            encoded = np.ascontiguousarray(data[:1])
-            modifier = "iso"
-        elif np.issubdtype(data.dtype, np.complexfloating):
-            if data.dtype not in {np.dtype("complex64"), np.dtype("complex128")}:
-                raise TypeError(f"unsupported complex dtype: {data.dtype}")
-            dtype = np.dtype("float32" if data.dtype == np.complex64 else "float64")
-            encoded = np.ascontiguousarray(data).view(dtype)
-            modifier = "complex"
-        else:
-            encoded = data
-            modifier = None
-        try:
-            primitive = dtype_to_str[encoded.dtype]
-        except KeyError as error:
-            raise TypeError(f"unsupported Binsparse dtype: {encoded.dtype}") from error
-        data_type = primitive if modifier is None else f"{modifier}[{primitive}]"
+        def encode(data: np.ndarray) -> tuple[np.ndarray, str]:
+            if data.ndim == 1 and data.strides == (0,):
+                if data.size == 0:
+                    raise ValueError("cannot encode an empty ISO buffer")
+                encoded, data_type = encode(data[:1].copy())
+                return encoded, f"iso[{data_type}]"
+            if np.issubdtype(data.dtype, np.complexfloating):
+                if data.dtype not in {np.dtype("complex64"), np.dtype("complex128")}:
+                    raise TypeError(f"unsupported complex dtype: {data.dtype}")
+                dtype = np.dtype("float32" if data.dtype == np.complex64 else "float64")
+                encoded, data_type = encode(np.ascontiguousarray(data).view(dtype))
+                return encoded, f"complex[{data_type}]"
+            try:
+                return data, dtype_to_str[data.dtype]
+            except KeyError as error:
+                raise TypeError(f"unsupported Binsparse dtype: {data.dtype}") from error
+
+        encoded, data_type = encode(np.asarray(value))
         self._write_buffer(key, encoded)
         return data_type
 
@@ -139,11 +130,12 @@ class HDF5BinsparseContainer(BinsparseContainer):
     def __init__(self, group: Any):
         self.group = group
 
-    def _read_header(self) -> Any:
+    def _read_header(self) -> dict[str, Any]:
         try:
-            return self.group.attrs[BINSPARSE_HEADER]
+            value = self.group.attrs[BINSPARSE_HEADER]
         except KeyError as error:
             raise KeyError("HDF5 group has no 'binsparse' attribute") from error
+        return json.loads(value)
 
     def _write_header(self, value: dict[str, Any]) -> None:
         self.group.attrs[BINSPARSE_HEADER] = json.dumps(
@@ -159,11 +151,10 @@ class HDF5BinsparseContainer(BinsparseContainer):
         self.group.create_dataset(key, data=value)
 
     def finalize(self) -> None:
-        self.group.file.flush()
+        pass
 
     def close(self) -> None:
-        self.finalize()
-        self.group.file.close()
+        pass
 
 
 class ZarrBinsparseContainer(BinsparseContainer):
@@ -172,7 +163,7 @@ class ZarrBinsparseContainer(BinsparseContainer):
     def __init__(self, group: Any):
         self.group = group
 
-    def _read_header(self) -> Any:
+    def _read_header(self) -> dict[str, Any]:
         try:
             return self.group.attrs[BINSPARSE_HEADER]
         except KeyError as error:
@@ -193,17 +184,10 @@ class ZarrBinsparseContainer(BinsparseContainer):
             self.group.create_dataset(key, data=value)
 
     def finalize(self) -> None:
-        store = getattr(self.group, "store", None)
-        flush = getattr(store, "flush", None)
-        if flush is not None:
-            flush()
+        pass
 
     def close(self) -> None:
-        self.finalize()
-        store = getattr(self.group, "store", None)
-        close = getattr(store, "close", None)
-        if close is not None:
-            close()
+        pass
 
 
 class NPZBinsparseContainer(BinsparseContainer):
@@ -241,17 +225,18 @@ class NPZBinsparseContainer(BinsparseContainer):
                     self.archive = {key: loaded[key] for key in loaded.files}
                     loaded.close()
 
-    def _read_header(self) -> Any:
+    def _read_header(self) -> dict[str, Any]:
         self._require_open()
         try:
-            return self.archive[BINSPARSE_HEADER]
+            value = self.archive[BINSPARSE_HEADER]
         except KeyError as error:
             raise KeyError("NPZ archive has no 'binsparse' entry") from error
+        return json.loads(str(value.item()))
 
     def _write_header(self, value: dict[str, Any]) -> None:
         self._require_open_and_writable()
-        self.archive[BINSPARSE_HEADER] = json.dumps(
-            value, indent=2, sort_keys=True, separators=(",", ": ")
+        self.archive[BINSPARSE_HEADER] = np.asarray(
+            json.dumps(value, indent=2, sort_keys=True, separators=(",", ": "))
         )
         self._dirty = True
 
