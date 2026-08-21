@@ -60,7 +60,6 @@ class BinsparseTensor(ABC):
     fill_value: Any = None
 
     version: ClassVar[str] = BINSPARSE_VERSION
-    format: ClassVar[str]
     def __post_init__(self) -> None:
         self.shape = tuple(self.shape)
         if any(size < 0 for size in self.shape):
@@ -123,7 +122,6 @@ class BinsparseTensor(ABC):
         """Write shared metadata, format-specific data, and the descriptor."""
         header: dict[str, Any] = {
             "version": BINSPARSE_VERSION,
-            "format": self.format,
             "shape": list(self.shape),
             "number_of_stored_values": self.number_of_stored_values,
         }
@@ -146,7 +144,6 @@ class BinsparseTensor(ABC):
 class CustomTensor(BinsparseTensor):
     level: BinsparseLevel | None = None
     transpose: tuple[int, ...] | None = None
-    format: ClassVar[str] = "custom"
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -266,7 +263,7 @@ class CustomTensor(BinsparseTensor):
         custom: dict[str, Any] = {"level": descriptor}
         if self.transpose is not None:
             custom["transpose"] = list(self.transpose)
-        result: dict[str, Any] = {"custom": custom}
+        result: dict[str, Any] = {"format": "custom", "custom": custom}
         for alias, (alias_descriptor, alias_transpose) in _PREDEFINED_LEVELS.items():
             if descriptor == alias_descriptor and self.transpose == alias_transpose:
                 result["format"] = alias
@@ -310,7 +307,6 @@ class CustomTensor(BinsparseTensor):
 @dataclass
 class DVECVector(BinsparseTensor):
     values: Any = None
-    format: ClassVar[str] = "DVEC"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -319,13 +315,12 @@ class DVECVector(BinsparseTensor):
 
     def _serialize(self, container):
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "DVEC"}
 
 
 @dataclass
 class DMATRMatrix(BinsparseTensor):
     values: Any = None
-    format: ClassVar[str] = "DMATR"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -334,13 +329,12 @@ class DMATRMatrix(BinsparseTensor):
 
     def _serialize(self, container):
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "DMATR"}
 
 
 @dataclass
 class DMATCMatrix(BinsparseTensor):
     values: Any = None
-    format: ClassVar[str] = "DMATC"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -349,7 +343,7 @@ class DMATCMatrix(BinsparseTensor):
 
     def _serialize(self, container):
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "DMATC"}
 
 
 DMATMatrix = DMATRMatrix
@@ -359,7 +353,6 @@ DMATMatrix = DMATRMatrix
 class CVECVector(BinsparseTensor):
     indices_0: Any = None
     values: Any = None
-    format: ClassVar[str] = "CVEC"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -373,7 +366,7 @@ class CVECVector(BinsparseTensor):
     def _serialize(self, container):
         container.write_buffer("indices_0", np.asarray(self.indices_0))
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "CVEC"}
 
 
 @dataclass
@@ -381,7 +374,6 @@ class CSRMatrix(BinsparseTensor):
     pointers_to_1: Any = None
     indices_1: Any = None
     values: Any = None
-    format: ClassVar[str] = "CSR"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -397,12 +389,15 @@ class CSRMatrix(BinsparseTensor):
         container.write_buffer("pointers_to_1", np.asarray(self.pointers_to_1))
         container.write_buffer("indices_1", np.asarray(self.indices_1))
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "CSR"}
 
 
 @dataclass
 class CSCMatrix(CSRMatrix):
-    format: ClassVar[str] = "CSC"
+    def _serialize(self, container):
+        result = super()._serialize(container)
+        result["format"] = "CSC"
+        return result
 
 
 @dataclass
@@ -411,7 +406,6 @@ class DCSRMatrix(BinsparseTensor):
     pointers_to_1: Any = None
     indices_1: Any = None
     values: Any = None
-    format: ClassVar[str] = "DCSR"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -430,12 +424,15 @@ class DCSRMatrix(BinsparseTensor):
         container.write_buffer("pointers_to_1", np.asarray(self.pointers_to_1))
         container.write_buffer("indices_1", np.asarray(self.indices_1))
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "DCSR"}
 
 
 @dataclass
 class DCSCMatrix(DCSRMatrix):
-    format: ClassVar[str] = "DCSC"
+    def _serialize(self, container):
+        result = super()._serialize(container)
+        result["format"] = "DCSC"
+        return result
 
 
 @dataclass
@@ -443,7 +440,6 @@ class COORMatrix(BinsparseTensor):
     indices_0: Any = None
     indices_1: Any = None
     values: Any = None
-    format: ClassVar[str] = "COOR"
 
     @classmethod
     def _parse(cls, container, header, common):
@@ -459,12 +455,15 @@ class COORMatrix(BinsparseTensor):
         container.write_buffer("indices_0", np.asarray(self.indices_0))
         container.write_buffer("indices_1", np.asarray(self.indices_1))
         container.write_buffer("values", np.asarray(self.values))
-        return {}
+        return {"format": "COOR"}
 
 
 @dataclass
 class COOCMatrix(COORMatrix):
-    format: ClassVar[str] = "COOC"
+    def _serialize(self, container):
+        result = super()._serialize(container)
+        result["format"] = "COOC"
+        return result
 
 
 COOMatrix = COORMatrix
