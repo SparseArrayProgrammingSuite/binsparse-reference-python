@@ -74,7 +74,7 @@ class BinsparseTensor(ABC):
     def parse(cls, container: BinsparseContainer) -> BinsparseTensor:
         """Parse a tensor and all required arrays from *container*."""
         header = container.read_header()
-        required = ("version", "format", "shape", "number_of_stored_values", "data_types")
+        required = ("version", "format", "shape", "number_of_stored_values")
         missing = next((key for key in required if key not in header), None)
         if missing is not None:
             raise BinsparseParseError(f"missing required descriptor key {missing!r}")
@@ -83,8 +83,6 @@ class BinsparseTensor(ABC):
                 f"unsupported Binsparse version {header['version']!r}; "
                 f"expected {BINSPARSE_VERSION!r}"
             )
-        if not isinstance(header["data_types"], dict):
-            raise BinsparseParseError("data_types must be an object")
         format_name = header["format"]
         try:
             tensor_cls = (
@@ -123,27 +121,24 @@ class BinsparseTensor(ABC):
 
     def serialize(self, container: BinsparseContainer) -> None:
         """Write shared metadata, format-specific data, and the descriptor."""
-        data_types: dict[str, str] = {}
         header: dict[str, Any] = {
             "version": BINSPARSE_VERSION,
             "format": self.format,
             "shape": list(self.shape),
             "number_of_stored_values": self.number_of_stored_values,
-            "data_types": data_types,
         }
         if self.fill is not None:
             header["fill"] = self.fill
         if self.fill is True:
             fill = np.asarray([self.fill_value])
-            data_types["fill_value"] = container.write_buffer("fill_value", fill)
-        header.update(self._serialize(container, data_types))
+            container.write_buffer("fill_value", fill)
+        header.update(self._serialize(container))
         container.write_header(header)
 
     @abstractmethod
     def _serialize(
         self,
         container: BinsparseContainer,
-        data_types: dict[str, str],
     ) -> dict[str, Any]:
         """Write format-specific arrays and return additional descriptor data."""
 
@@ -247,9 +242,8 @@ class CustomTensor(BinsparseTensor):
     def _serialize(
         self,
         container: BinsparseContainer,
-        data_types: dict[str, str],
     ) -> dict[str, Any]:
-        descriptor = self._serialize_level(container, self.level, 0, data_types)
+        descriptor = self._serialize_level(container, self.level, 0)
         custom: dict[str, Any] = {"level": descriptor}
         if self.transpose is not None:
             custom["transpose"] = list(self.transpose)
@@ -265,17 +259,14 @@ class CustomTensor(BinsparseTensor):
         container: BinsparseContainer,
         level: BinsparseLevel | None,
         depth: int,
-        data_types: dict[str, str],
     ) -> dict[str, Any]:
         match level:
             case ElementLevel(values):
-                data_types["values"] = container.write_buffer(
-                    "values", np.asarray(values)
-                )
+                container.write_buffer("values", np.asarray(values))
                 return {"level_desc": "element"}
             case DenseLevel(rank, child_level):
                 child = CustomTensor._serialize_level(
-                    container, child_level, depth + rank, data_types
+                    container, child_level, depth + rank
                 )
                 return {"level_desc": "dense", "rank": rank, "level": child}
             case SparseLevel(rank, child_level, indices, pointers):
@@ -285,16 +276,12 @@ class CustomTensor(BinsparseTensor):
                             f"sparse level at depth {depth} requires pointers"
                         )
                     name = f"pointers_to_{depth}"
-                    data_types[name] = container.write_buffer(
-                        name, np.asarray(pointers)
-                    )
+                    container.write_buffer(name, np.asarray(pointers))
                 for offset, index in enumerate(indices):
                     name = f"indices_{depth + offset}"
-                    data_types[name] = container.write_buffer(
-                        name, np.asarray(index)
-                    )
+                    container.write_buffer(name, np.asarray(index))
                 child = CustomTensor._serialize_level(
-                    container, child_level, depth + rank, data_types
+                    container, child_level, depth + rank
                 )
                 return {"level_desc": "sparse", "rank": rank, "level": child}
             case _:
@@ -310,8 +297,8 @@ class DVECVector(BinsparseTensor):
     def _parse(cls, container, header, common):
         return cls(**common, values=container.read_buffer("values"))
 
-    def _serialize(self, container, data_types):
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 
@@ -324,8 +311,8 @@ class DMATRMatrix(BinsparseTensor):
     def _parse(cls, container, header, common):
         return cls(**common, values=container.read_buffer("values"))
 
-    def _serialize(self, container, data_types):
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 
@@ -338,8 +325,8 @@ class DMATCMatrix(BinsparseTensor):
     def _parse(cls, container, header, common):
         return cls(**common, values=container.read_buffer("values"))
 
-    def _serialize(self, container, data_types):
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 
@@ -360,11 +347,9 @@ class CVECVector(BinsparseTensor):
             values=container.read_buffer("values"),
         )
 
-    def _serialize(self, container, data_types):
-        data_types["indices_0"] = container.write_buffer(
-            "indices_0", np.asarray(self.indices_0)
-        )
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("indices_0", np.asarray(self.indices_0))
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 
@@ -384,14 +369,10 @@ class CSRMatrix(BinsparseTensor):
             values=container.read_buffer("values"),
         )
 
-    def _serialize(self, container, data_types):
-        data_types["pointers_to_1"] = container.write_buffer(
-            "pointers_to_1", np.asarray(self.pointers_to_1)
-        )
-        data_types["indices_1"] = container.write_buffer(
-            "indices_1", np.asarray(self.indices_1)
-        )
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("pointers_to_1", np.asarray(self.pointers_to_1))
+        container.write_buffer("indices_1", np.asarray(self.indices_1))
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 
@@ -418,17 +399,11 @@ class DCSRMatrix(BinsparseTensor):
             values=container.read_buffer("values"),
         )
 
-    def _serialize(self, container, data_types):
-        data_types["indices_0"] = container.write_buffer(
-            "indices_0", np.asarray(self.indices_0)
-        )
-        data_types["pointers_to_1"] = container.write_buffer(
-            "pointers_to_1", np.asarray(self.pointers_to_1)
-        )
-        data_types["indices_1"] = container.write_buffer(
-            "indices_1", np.asarray(self.indices_1)
-        )
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("indices_0", np.asarray(self.indices_0))
+        container.write_buffer("pointers_to_1", np.asarray(self.pointers_to_1))
+        container.write_buffer("indices_1", np.asarray(self.indices_1))
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 
@@ -453,14 +428,10 @@ class COORMatrix(BinsparseTensor):
             values=container.read_buffer("values"),
         )
 
-    def _serialize(self, container, data_types):
-        data_types["indices_0"] = container.write_buffer(
-            "indices_0", np.asarray(self.indices_0)
-        )
-        data_types["indices_1"] = container.write_buffer(
-            "indices_1", np.asarray(self.indices_1)
-        )
-        data_types["values"] = container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container):
+        container.write_buffer("indices_0", np.asarray(self.indices_0))
+        container.write_buffer("indices_1", np.asarray(self.indices_1))
+        container.write_buffer("values", np.asarray(self.values))
         return {}
 
 

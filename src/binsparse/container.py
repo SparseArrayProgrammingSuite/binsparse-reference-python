@@ -35,9 +35,15 @@ str_to_dtype = {value: key for key, value in dtype_to_str.items()}
 class BinsparseContainer(ABC):
     """Common interface to a Binsparse binary container or container group."""
 
+    def __init__(self) -> None:
+        self.data_types: dict[str, str] = {}
+
     def read_header(self) -> dict[str, Any]:
         """Return the decoded Binsparse JSON descriptor."""
-        return self._read_header()
+        header = self._read_header()
+        if not isinstance(header.get("data_types"), dict):
+            raise BinsparseParseError("data_types must be an object")
+        return header
 
     @abstractmethod
     def _read_header(self) -> dict[str, Any]:
@@ -47,8 +53,9 @@ class BinsparseContainer(ABC):
         """Store a Binsparse JSON descriptor."""
         if not isinstance(value, dict):
             raise TypeError("the binsparse header must be a dictionary")
-        json.dumps(value)
-        self._write_header(value)
+        header = {**value, "data_types": self.data_types.copy()}
+        json.dumps(header)
+        self._write_header(header)
 
     @abstractmethod
     def _write_header(self, value: dict[str, Any]) -> None:
@@ -98,8 +105,8 @@ class BinsparseContainer(ABC):
         self,
         key: str,
         value: np.ndarray,
-    ) -> str:
-        """Encode, create or replace a named array, returning its data type."""
+    ) -> None:
+        """Encode, create or replace a named array and record its data type."""
         def encode(data: np.ndarray) -> tuple[np.ndarray, str]:
             if data.ndim == 1 and data.strides == (0,):
                 if data.size == 0:
@@ -119,7 +126,7 @@ class BinsparseContainer(ABC):
 
         encoded, data_type = encode(np.asarray(value))
         self._write_buffer(key, encoded)
-        return data_type
+        self.data_types[key] = data_type
 
     @abstractmethod
     def _write_buffer(self, key: str, value: np.ndarray) -> None:
@@ -129,6 +136,7 @@ class HDF5BinsparseContainer(BinsparseContainer):
     """Adapt an h5py ``Container`` or ``Group``."""
 
     def __init__(self, group: Any):
+        super().__init__()
         self.group = group
 
     def _read_header(self) -> dict[str, Any]:
@@ -155,6 +163,7 @@ class ZarrBinsparseContainer(BinsparseContainer):
     """Adapt a Zarr group without requiring Zarr as a dependency."""
 
     def __init__(self, group: Any):
+        super().__init__()
         self.group = group
 
     def _read_header(self) -> dict[str, Any]:
@@ -181,6 +190,7 @@ class NPZBinsparseContainer(BinsparseContainer):
     """Adapt a mutable mapping of NPZ entry names to NumPy arrays."""
 
     def __init__(self, file: MutableMapping[str, np.ndarray]):
+        super().__init__()
         self.file = file
 
     def _read_header(self) -> dict[str, Any]:
