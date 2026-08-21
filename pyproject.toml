@@ -4,6 +4,29 @@ dependencies = []
 name = "binsparse"
 requires-python = ">= 3.11"
 version = "0.1.0"
+dependencies = [
+    h5py = ">=3.16.0,<4",
+    numpy = ">=2.5.2,<3",
+    dlpack = ">=1.3,<2",
+]
+
+[dependency-groups]
+test = [
+    "pytest>=7.4.4",
+    "pre-commit>=3.6.0,<5",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.15,<2",
+]
+benchmark = [
+    "pytest-codspeed>=5",
+    {include-group = "test"},
+]
+docs = [
+    "mkdocs-material>=9.7.7,<10",
+    "mkdocstrings[python]>=1.0.6",
+    "mkdocs-autoapi>=0.4.1",
+    "ruff>=0.6.0",
+]
 
 [build-system]
 build-backend = "hatchling.build"
@@ -13,12 +36,61 @@ requires = ["hatchling"]
 channels = ["conda-forge"]
 platforms = ["osx-arm64"]
 
+[tool.pixi.environments]
+test = { features = ["test"], solve-group = "default" }
+benchmark = { features = ["test", "benchmark"], solve-group = "default" }
+docs = { features = ["docs"], solve-group = "default" }
+pre-commit = { features = ["pre-commit"], no-default-feature = true }
+
 [tool.pixi.pypi-dependencies]
 binsparse = { path = ".", editable = true }
 
-[tool.pixi.tasks]
+[tool.ruff.lint]
+select = ["F", "E", "W", "I", "B", "UP", "YTT", "BLE", "C4", "T10", "ISC", "ICN", "PIE", "PYI", "RSE", "RET", "SIM", "PGH", "FLY", "NPY", "PERF", "RUF022", "TID"]
+ignore = ["PYI024"]
 
-[tool.pixi.dependencies]
-h5py = ">=3.16.0,<4"
-numpy = ">=2.5.2,<3"
-dlpack = ">=1.3,<2"
+[tool.mypy]
+ignore_missing_imports = true
+exclude = []
+files = ["src"]
+
+[tool.pytest]
+addopts = [
+    "--doctest-modules",
+    "--doctest-ignore-import-errors",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+    "--cov-report=term",
+    "--cov=finch",
+    "--cov-config=.coveragerc",
+]
+testpaths = ["src"]
+junit_family = "xunit2"
+strict = true
+
+
+[tool.pixi.feature.test.tasks.test-only]
+cmd = "pytest -m 'not c_backend and not mlir_backend' -n {{ njobs }}"
+args = [
+    { arg = "njobs", default = "logical" },
+]
+default-environment = "test"
+
+[tool.pixi.feature.benchmark.tasks.benchmark]
+cmd = "pytest --codspeed benchmarks/"
+depends-on = [{task = "compile", environment = "benchmark"}]
+default-environment = "benchmark"
+
+[tool.pixi.feature.test.tasks.type-check]
+cmd = "python -m mypy"
+default-environment = "test"
+
+[tool.pixi.feature.docs.tasks.serve-docs]
+cmd = "mkdocs serve --strict"
+default-environment = "docs"
+
+[tool.pixi.feature.docs.tasks.build-docs]
+cmd = "mkdocs build --strict"
+default-environment = "docs"
+
