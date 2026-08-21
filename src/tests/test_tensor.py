@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 from binsparse.container import NPZBinsparseContainer
 from binsparse.tensor import (
@@ -13,8 +11,8 @@ from binsparse.tensor import (
 )
 
 
-def test_csr_round_trip(tmp_path: Path) -> None:
-    path = tmp_path / "csr.npz"
+def test_csr_round_trip() -> None:
+    archive: dict[str, np.ndarray] = {}
     original = CSRMatrix(
         (3, 4),
         3,
@@ -25,10 +23,9 @@ def test_csr_round_trip(tmp_path: Path) -> None:
         values=np.array([2, 4, 8], dtype=np.float32),
     )
 
-    with NPZBinsparseContainer(path, "w") as container:
-        original.serialize(container)
-    with NPZBinsparseContainer(path) as container:
-        parsed = BinsparseTensor.parse(container)
+    container = NPZBinsparseContainer(archive)
+    original.serialize(container)
+    parsed = BinsparseTensor.parse(container)
 
     assert isinstance(parsed, CSRMatrix)
     assert parsed.shape == original.shape
@@ -38,8 +35,8 @@ def test_csr_round_trip(tmp_path: Path) -> None:
     np.testing.assert_array_equal(parsed.values, original.values)
 
 
-def test_predefined_format_parses_as_custom(tmp_path: Path) -> None:
-    path = tmp_path / "csr.npz"
+def test_predefined_format_parses_as_custom() -> None:
+    archive: dict[str, np.ndarray] = {}
     tensor = CSRMatrix(
         (2, 3),
         1,
@@ -47,18 +44,17 @@ def test_predefined_format_parses_as_custom(tmp_path: Path) -> None:
         indices_1=np.array([2], dtype=np.uint32),
         values=np.array([5], dtype=np.int8),
     )
-    with NPZBinsparseContainer(path, "w") as container:
-        tensor.serialize(container)
-    with NPZBinsparseContainer(path) as container:
-        parsed = CustomTensor.parse(container)
+    container = NPZBinsparseContainer(archive)
+    tensor.serialize(container)
+    parsed = CustomTensor.parse(container)
 
     assert isinstance(parsed, CustomTensor)
     assert isinstance(parsed.level, DenseLevel)
     assert isinstance(parsed.level.level, SparseLevel)
 
 
-def test_iso_parse_uses_zero_stride_array(tmp_path: Path) -> None:
-    path = tmp_path / "custom.npz"
+def test_iso_parse_uses_zero_stride_array() -> None:
+    archive: dict[str, np.ndarray] = {}
     tensor = CustomTensor(
         (3, 4),
         2,
@@ -72,12 +68,11 @@ def test_iso_parse_uses_zero_stride_array(tmp_path: Path) -> None:
             ),
         ),
     )
-    with NPZBinsparseContainer(path, "w") as container:
-        tensor.serialize(container)
-        assert container.read_header()["format"] == "CSR"
-    with NPZBinsparseContainer(path) as container:
-        parsed = BinsparseTensor.parse(container)
-        custom = CustomTensor.parse(container)
+    container = NPZBinsparseContainer(archive)
+    tensor.serialize(container)
+    assert container.read_header()["format"] == "CSR"
+    parsed = BinsparseTensor.parse(container)
+    custom = CustomTensor.parse(container)
 
     assert isinstance(parsed, CSRMatrix)
     assert parsed.values.shape == (2,)
@@ -90,18 +85,17 @@ def test_iso_parse_uses_zero_stride_array(tmp_path: Path) -> None:
     assert custom.level.level.level.value == 7
 
 
-def test_complex_buffer_is_decoded_by_container_layer(tmp_path: Path) -> None:
-    path = tmp_path / "complex.npz"
+def test_complex_buffer_is_decoded_by_container_layer() -> None:
+    archive: dict[str, np.ndarray] = {}
     original = DVECVector(
         (2,),
         2,
         values=np.array([1 + 2j, 3 + 4j], dtype=np.complex64),
     )
-    with NPZBinsparseContainer(path, "w") as container:
-        original.serialize(container)
-        assert container.read_header()["data_types"]["values"] == "complex[float32]"
-    with NPZBinsparseContainer(path) as container:
-        parsed = BinsparseTensor.parse(container)
+    container = NPZBinsparseContainer(archive)
+    original.serialize(container)
+    assert container.read_header()["data_types"]["values"] == "complex[float32]"
+    parsed = BinsparseTensor.parse(container)
 
     assert isinstance(parsed, DVECVector)
     np.testing.assert_array_equal(
@@ -109,18 +103,17 @@ def test_complex_buffer_is_decoded_by_container_layer(tmp_path: Path) -> None:
     )
 
 
-def test_nested_iso_complex_buffer_round_trip(tmp_path: Path) -> None:
-    path = tmp_path / "iso-complex.npz"
+def test_nested_iso_complex_buffer_round_trip() -> None:
+    archive: dict[str, np.ndarray] = {}
     values = np.broadcast_to(np.array([1 + 2j], dtype=np.complex64), (3,))
     original = DVECVector((3,), 3, values=values)
 
-    with NPZBinsparseContainer(path, "w") as container:
-        original.serialize(container)
-        assert container.read_header()["data_types"]["values"] == (
-            "iso[complex[float32]]"
-        )
-    with NPZBinsparseContainer(path) as container:
-        parsed = BinsparseTensor.parse(container)
+    container = NPZBinsparseContainer(archive)
+    original.serialize(container)
+    assert container.read_header()["data_types"]["values"] == (
+        "iso[complex[float32]]"
+    )
+    parsed = BinsparseTensor.parse(container)
 
     assert isinstance(parsed, DVECVector)
     assert parsed.values.strides == (0,)

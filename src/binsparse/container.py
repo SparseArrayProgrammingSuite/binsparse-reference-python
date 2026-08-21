@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import MutableMapping
 import json
 import re
 from typing import Any
@@ -109,21 +110,6 @@ class BinsparseContainer(ABC):
     def _write_buffer(self, key: str, value: np.ndarray) -> None:
         """Write an already encoded named binary array."""
 
-    @abstractmethod
-    def finalize(self) -> None:
-        """Flush pending changes without closing the container."""
-
-    @abstractmethod
-    def close(self) -> None:
-        """Finalize and release the underlying container."""
-
-    def __enter__(self) -> BinsparseContainer:
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
-
-
 class HDF5BinsparseContainer(BinsparseContainer):
     """Adapt an h5py ``Container`` or ``Group``."""
 
@@ -149,13 +135,6 @@ class HDF5BinsparseContainer(BinsparseContainer):
         if key in self.group:
             del self.group[key]
         self.group.create_dataset(key, data=value)
-
-    def finalize(self) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
 
 class ZarrBinsparseContainer(BinsparseContainer):
     """Adapt a Zarr group without requiring Zarr as a dependency."""
@@ -183,102 +162,33 @@ class ZarrBinsparseContainer(BinsparseContainer):
         else:
             self.group.create_dataset(key, data=value)
 
-    def finalize(self) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
-
 class NPZBinsparseContainer(BinsparseContainer):
-    """Read or assemble an NPZ archive and persist it on finalization.
+    """Adapt a mutable mapping of NPZ entry names to NumPy arrays."""
 
-    ``mode`` follows the familiar file conventions: ``"r"`` reads an existing
-    archive, ``"w"`` creates one, and ``"a"`` loads an existing archive for
-    modification (or creates it if it does not exist).
-    """
-
-    def __init__(self, file: Any, mode: str = "r"):
-        if mode not in {"r", "w", "a"}:
-            raise ValueError("NPZ mode must be 'r', 'w', or 'a'")
-
-        import numpy
-
+    def __init__(self, file: MutableMapping[str, np.ndarray]):
         self.file = file
-        self.mode = mode
-        self._dirty = False
-        self._closed = False
-
-        if mode == "w":
-            self.archive: Any = {}
-        else:
-            try:
-                loaded = numpy.load(file, allow_pickle=False)
-            except FileNotFoundError:
-                if mode == "r":
-                    raise
-                self.archive = {}
-            else:
-                if mode == "r":
-                    self.archive = loaded
-                else:
-                    self.archive = {key: loaded[key] for key in loaded.files}
-                    loaded.close()
 
     def _read_header(self) -> dict[str, Any]:
-        self._require_open()
         try:
-            value = self.archive[BINSPARSE_HEADER]
+            value = self.file[BINSPARSE_HEADER]
         except KeyError as error:
             raise KeyError("NPZ archive has no 'binsparse' entry") from error
         return json.loads(str(value.item()))
 
     def _write_header(self, value: dict[str, Any]) -> None:
-        self._require_open_and_writable()
-        self.archive[BINSPARSE_HEADER] = np.asarray(
+        self.file[BINSPARSE_HEADER] = np.asarray(
             json.dumps(value, indent=2, sort_keys=True, separators=(",", ": "))
         )
-        self._dirty = True
 
     def _read_buffer(self, key: str) -> np.ndarray:
-        self._require_open()
         if key == BINSPARSE_HEADER:
             raise KeyError("use read_header() to access binsparse metadata")
-        return np.asarray(self.archive[key])
+        return self.file[key]
 
     def _write_buffer(self, key: str, value: np.ndarray) -> None:
         if key == BINSPARSE_HEADER:
             raise KeyError("use write_header() to set binsparse metadata")
-        self._require_open_and_writable()
-        self.archive[key] = value
-        self._dirty = True
-
-    def finalize(self) -> None:
-        self._require_open()
-        if self.mode != "r" and self._dirty:
-            import numpy
-
-            numpy.savez(self.file, **self.archive)
-            self._dirty = False
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self.finalize()
-        close = getattr(self.archive, "close", None)
-        if close is not None:
-            close()
-        self._closed = True
-
-    def _require_open(self) -> None:
-        if self._closed:
-            raise ValueError("operation on closed NPZ Binsparse file")
-
-    def _require_open_and_writable(self) -> None:
-        self._require_open()
-        if self.mode == "r":
-            raise TypeError("NPZ Binsparse file is not writable")
-
+        self.file[key] = value
 
 __all__ = [
     "BINSPARSE_HEADER",
