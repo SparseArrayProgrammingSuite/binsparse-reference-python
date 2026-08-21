@@ -13,6 +13,7 @@ dependencies = [
 test = [
     "pytest>=7.4.4",
     "pytest-cov>=4.1.0",
+    "pytest-xdist>=3.5.0",
     "mypy>=1.15,<2",
 ]
 pre-commit = [
@@ -58,31 +59,24 @@ ignore_missing_imports = true
 exclude = []
 files = ["src"]
 
-[tool.pytest]
+[tool.pytest.ini_options]
 addopts = [
     "--doctest-modules",
     "--doctest-ignore-import-errors",
     "--cov-report=term-missing",
-    "--cov-report=html",
-    "--cov-report=xml",
-    "--cov-report=term",
-    "--cov=finch",
-    "--cov-config=.coveragerc",
+    "--cov=binsparse",
 ]
 testpaths = ["src"]
 junit_family = "xunit2"
-strict = true
+strict_config = true
+strict_markers = true
 
 [tool.pixi.feature.test.tasks.test]
 args = [
-    { arg = "pre_commit_skip", default = "" },
     { arg = "njobs", default = "logical" },
 ]
 depends-on = [
-    { task = "compile", environment = "test" },
-    { task = "pre-commit", environment = "pre-commit", args = ["{{ pre_commit_skip }}"] },
     { task = "type-check", environment = "test", args = [] },
-    { task = "test-array-api", args = ["{{ njobs }}"] },
     { task = "test-only", args = ["{{ njobs }}"] },
 ]
 
@@ -95,7 +89,6 @@ default-environment = "test"
 
 [tool.pixi.feature.benchmark.tasks.benchmark]
 cmd = "pytest --codspeed benchmarks/"
-depends-on = [{task = "compile", environment = "benchmark"}]
 default-environment = "benchmark"
 
 [tool.pixi.feature.test.tasks.type-check]

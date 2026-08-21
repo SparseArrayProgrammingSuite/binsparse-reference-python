@@ -94,6 +94,9 @@ class BinsparseTensor:
         if self.fill is not True and self.fill_value is not None:
             raise ValueError("fill_value requires fill=True")
 
+    def parse(self, f:BinsparseContainer):
+        
+
 
 @dataclass
 class CustomTensor(BinsparseTensor):

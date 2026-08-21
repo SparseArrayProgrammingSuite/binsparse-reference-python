@@ -32,7 +32,7 @@ def _encode_json(value: dict[str, Any]) -> str:
     return json.dumps(value, indent=2, sort_keys=True, separators=(",", ": "))
 
 
-class BinsparseFile(ABC):
+class BinsparseContainer(ABC):
     """Common interface to a Binsparse binary container or container group."""
 
     @abstractmethod
@@ -59,15 +59,15 @@ class BinsparseFile(ABC):
     def close(self) -> None:
         """Finalize and release the underlying container."""
 
-    def __enter__(self) -> BinsparseFile:
+    def __enter__(self) -> BinsparseContainer:
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         self.close()
 
 
-class HDF5BinsparseFile(BinsparseFile):
-    """Adapt an h5py ``File`` or ``Group``."""
+class HDF5BinsparseContainer(BinsparseContainer):
+    """Adapt an h5py ``Container`` or ``Group``."""
 
     def __init__(self, group: Any):
         self.group = group
@@ -98,7 +98,7 @@ class HDF5BinsparseFile(BinsparseFile):
         self.group.file.close()
 
 
-class ZarrBinsparseFile(BinsparseFile):
+class ZarrBinsparseContainer(BinsparseContainer):
     """Adapt a Zarr group without requiring Zarr as a dependency."""
 
     def __init__(self, group: Any):
@@ -140,7 +140,7 @@ class ZarrBinsparseFile(BinsparseFile):
             close()
 
 
-class NPZBinsparseFile(BinsparseFile):
+class NPZBinsparseContainer(BinsparseContainer):
     """Read or assemble an NPZ archive and persist it on finalization.
 
     ``mode`` follows the familiar file conventions: ``"r"`` reads an existing
@@ -164,7 +164,7 @@ class NPZBinsparseFile(BinsparseFile):
         else:
             try:
                 loaded = numpy.load(file, allow_pickle=False)
-            except FileNotFoundError:
+            except ContainerNotFoundError:
                 if mode == "r":
                     raise
                 self.archive = {}
@@ -230,8 +230,8 @@ class NPZBinsparseFile(BinsparseFile):
 
 __all__ = [
     "BINSPARSE_HEADER",
-    "BinsparseFile",
-    "HDF5BinsparseFile",
-    "ZarrBinsparseFile",
-    "NPZBinsparseFile",
+    "BinsparseContainer",
+    "HDF5BinsparseContainer",
+    "ZarrBinsparseContainer",
+    "NPZBinsparseContainer",
 ]
