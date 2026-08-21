@@ -72,7 +72,13 @@ class BinsparseTensor(ABC):
             raise ValueError("fill_value requires fill=True")
 
     @classmethod
-    def parse(cls, container: BinsparseContainer) -> BinsparseTensor:
+    def parse(
+        cls,
+        container: BinsparseContainer,
+        *,
+        alias: bool | None = None,
+        copy: bool | None = None,
+    ) -> BinsparseTensor:
         """Parse a tensor and all required arrays from *container*."""
         header = container.read_header()
         required = ("version", "format", "shape", "number_of_stored_values")
@@ -85,13 +91,25 @@ class BinsparseTensor(ABC):
                 f"expected {BINSPARSE_VERSION!r}"
             )
         format_name = header["format"]
-        requested_format = getattr(cls, "format", format_name)
-        if requested_format != format_name:
-            raise BinsparseParseError(
-                f"descriptor format {format_name!r} cannot be parsed as {cls.__name__}"
-            )
         try:
-            tensor_cls = cls if hasattr(cls, "format") else _FORMAT_CLASSES[format_name]
+            if hasattr(cls, "format"):
+                if cls.format != format_name:
+                    raise BinsparseParseError(
+                        f"descriptor format {format_name!r} cannot be parsed as "
+                        f"{cls.__name__}"
+                    )
+                tensor_cls = cls
+            elif alias is False:
+                tensor_cls = CustomTensor
+            elif alias is True and format_name == "custom":
+                alias_name = _custom_alias(header)
+                tensor_cls = (
+                    CustomTensor
+                    if alias_name is None
+                    else _FORMAT_CLASSES[alias_name]
+                )
+            else:
+                tensor_cls = _FORMAT_CLASSES[format_name]
         except KeyError as error:
             raise BinsparseParseError(f"unrecognized format {format_name!r}") from error
         common: dict[str, Any] = {
@@ -100,11 +118,11 @@ class BinsparseTensor(ABC):
             "fill": header.get("fill"),
         }
         if common["fill"] is True:
-            fill = container.read_buffer("fill_value", 1)
+            fill = container.read_buffer("fill_value", 1, copy=copy)
             if fill.size != 1:
                 raise BinsparseParseError("fill_value must contain exactly one value")
             common["fill_value"] = fill.reshape(-1)[0]
-        return tensor_cls._parse(container, header, common)
+        return tensor_cls._parse(container, header, common, copy)
 
     @classmethod
     @abstractmethod
@@ -113,10 +131,17 @@ class BinsparseTensor(ABC):
         container: BinsparseContainer,
         header: dict[str, Any],
         common: dict[str, Any],
+        copy: bool | None,
     ) -> BinsparseTensor:
         """Parse format-specific data after shared metadata has been parsed."""
 
-    def serialize(self, container: BinsparseContainer) -> None:
+    def serialize(
+        self,
+        container: BinsparseContainer,
+        *,
+        alias: bool | None = None,
+        copy: bool | None = None,
+    ) -> None:
         """Write shared metadata, format-specific data, and the descriptor."""
         header: dict[str, Any] = {
             "version": BINSPARSE_VERSION,
@@ -128,14 +153,26 @@ class BinsparseTensor(ABC):
             header["fill"] = self.fill
         if self.fill is True:
             fill = np.asarray([self.fill_value])
-            container.write_buffer("fill_value", fill)
-        header.update(self._serialize(container))
+            container.write_buffer("fill_value", fill, copy=copy)
+        header.update(self._serialize(container, copy))
+        if alias is False and self.format != "custom":
+            descriptor, transpose = _PREDEFINED_LEVELS[self.format]
+            custom: dict[str, Any] = {"level": descriptor}
+            if transpose is not None:
+                custom["transpose"] = list(transpose)
+            header.update(format="custom", custom=custom)
+        elif alias is True and self.format == "custom":
+            alias_name = _custom_alias(header)
+            if alias_name is not None:
+                header["format"] = alias_name
+                header.pop("custom")
         container.write_header(header)
 
     @abstractmethod
     def _serialize(
         self,
         container: BinsparseContainer,
+        copy: bool | None,
     ) -> dict[str, Any]:
         """Write format-specific arrays and return additional descriptor data."""
 
@@ -171,6 +208,7 @@ class CustomTensor(BinsparseTensor):
         container: BinsparseContainer,
         header: dict[str, Any],
         common: dict[str, Any],
+        copy: bool | None,
     ) -> BinsparseTensor:
         format_name = header["format"]
         if format_name == "custom":
@@ -186,7 +224,7 @@ class CustomTensor(BinsparseTensor):
             except KeyError as error:
                 raise BinsparseParseError(f"unrecognized format {format_name!r}") from error
         transpose_tuple = None if transpose is None else tuple(transpose)
-        level = cls._parse_level(container, header, descriptor, 0)
+        level = cls._parse_level(container, header, descriptor, 0, copy)
         return cls(
             **common,
             level=level,
@@ -199,6 +237,7 @@ class CustomTensor(BinsparseTensor):
         header: dict[str, Any],
         descriptor: dict[str, Any],
         depth: int,
+        copy: bool | None,
     ) -> BinsparseLevel:
         try:
             level_desc = descriptor["level_desc"]
@@ -207,7 +246,7 @@ class CustomTensor(BinsparseTensor):
         match level_desc:
             case "element":
                 count = header["number_of_stored_values"]
-                return ElementLevel(container.read_buffer("values", count))
+                return ElementLevel(container.read_buffer("values", count, copy=copy))
             case "dense":
                 try:
                     rank = descriptor["rank"]
@@ -223,6 +262,7 @@ class CustomTensor(BinsparseTensor):
                     header,
                     child_descriptor,
                     depth + rank,
+                    copy,
                 )
                 return DenseLevel(rank, child)
             case "sparse":
@@ -238,10 +278,10 @@ class CustomTensor(BinsparseTensor):
                 pointers = (
                     None
                     if depth == 0
-                    else container.read_buffer(f"pointers_to_{depth}")
+                    else container.read_buffer(f"pointers_to_{depth}", copy=copy)
                 )
                 indices = tuple(
-                    container.read_buffer(f"indices_{dimension}")
+                    container.read_buffer(f"indices_{dimension}", copy=copy)
                     for dimension in range(depth, depth + rank)
                 )
                 child = CustomTensor._parse_level(
@@ -249,6 +289,7 @@ class CustomTensor(BinsparseTensor):
                     header,
                     child_descriptor,
                     depth + rank,
+                    copy,
                 )
                 return SparseLevel(rank, child, indices, pointers)
             case _:
@@ -259,31 +300,28 @@ class CustomTensor(BinsparseTensor):
     def _serialize(
         self,
         container: BinsparseContainer,
+        copy: bool | None,
     ) -> dict[str, Any]:
-        descriptor = self._serialize_level(container, self.level, 0)
+        descriptor = self._serialize_level(container, self.level, 0, copy)
         custom: dict[str, Any] = {"level": descriptor}
         if self.transpose is not None:
             custom["transpose"] = list(self.transpose)
-        result: dict[str, Any] = {"custom": custom}
-        for alias, (alias_descriptor, alias_transpose) in _PREDEFINED_LEVELS.items():
-            if descriptor == alias_descriptor and self.transpose == alias_transpose:
-                result["format"] = alias
-                break
-        return result
+        return {"custom": custom}
 
     @staticmethod
     def _serialize_level(
         container: BinsparseContainer,
         level: BinsparseLevel | None,
         depth: int,
+        copy: bool | None,
     ) -> dict[str, Any]:
         match level:
             case ElementLevel(values):
-                container.write_buffer("values", np.asarray(values))
+                container.write_buffer("values", np.asarray(values), copy=copy)
                 return {"level_desc": "element"}
             case DenseLevel(rank, child_level):
                 child = CustomTensor._serialize_level(
-                    container, child_level, depth + rank
+                    container, child_level, depth + rank, copy
                 )
                 return {"level_desc": "dense", "rank": rank, "level": child}
             case SparseLevel(rank, child_level, indices, pointers):
@@ -293,12 +331,12 @@ class CustomTensor(BinsparseTensor):
                             f"sparse level at depth {depth} requires pointers"
                         )
                     name = f"pointers_to_{depth}"
-                    container.write_buffer(name, np.asarray(pointers))
+                    container.write_buffer(name, np.asarray(pointers), copy=copy)
                 for offset, index in enumerate(indices):
                     name = f"indices_{depth + offset}"
-                    container.write_buffer(name, np.asarray(index))
+                    container.write_buffer(name, np.asarray(index), copy=copy)
                 child = CustomTensor._serialize_level(
-                    container, child_level, depth + rank
+                    container, child_level, depth + rank, copy
                 )
                 return {"level_desc": "sparse", "rank": rank, "level": child}
             case _:
@@ -311,12 +349,12 @@ class DVECVector(BinsparseTensor):
     format: ClassVar[str] = "DVEC"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
-        return cls(**common, values=container.read_buffer("values", count))
+        return cls(**common, values=container.read_buffer("values", count, copy=copy))
 
-    def _serialize(self, container):
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -326,12 +364,12 @@ class DMATRMatrix(BinsparseTensor):
     format: ClassVar[str] = "DMATR"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
-        return cls(**common, values=container.read_buffer("values", count))
+        return cls(**common, values=container.read_buffer("values", count, copy=copy))
 
-    def _serialize(self, container):
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -341,12 +379,12 @@ class DMATCMatrix(BinsparseTensor):
     format: ClassVar[str] = "DMATC"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
-        return cls(**common, values=container.read_buffer("values", count))
+        return cls(**common, values=container.read_buffer("values", count, copy=copy))
 
-    def _serialize(self, container):
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -360,17 +398,17 @@ class CVECVector(BinsparseTensor):
     format: ClassVar[str] = "CVEC"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
         return cls(
             **common,
-            indices_0=container.read_buffer("indices_0"),
-            values=container.read_buffer("values", count),
+            indices_0=container.read_buffer("indices_0", copy=copy),
+            values=container.read_buffer("values", count, copy=copy),
         )
 
-    def _serialize(self, container):
-        container.write_buffer("indices_0", np.asarray(self.indices_0))
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer("indices_0", np.asarray(self.indices_0), copy=copy)
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -382,19 +420,21 @@ class CSRMatrix(BinsparseTensor):
     format: ClassVar[str] = "CSR"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
         return cls(
             **common,
-            pointers_to_1=container.read_buffer("pointers_to_1"),
-            indices_1=container.read_buffer("indices_1"),
-            values=container.read_buffer("values", count),
+            pointers_to_1=container.read_buffer("pointers_to_1", copy=copy),
+            indices_1=container.read_buffer("indices_1", copy=copy),
+            values=container.read_buffer("values", count, copy=copy),
         )
 
-    def _serialize(self, container):
-        container.write_buffer("pointers_to_1", np.asarray(self.pointers_to_1))
-        container.write_buffer("indices_1", np.asarray(self.indices_1))
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer(
+            "pointers_to_1", np.asarray(self.pointers_to_1), copy=copy
+        )
+        container.write_buffer("indices_1", np.asarray(self.indices_1), copy=copy)
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -412,22 +452,24 @@ class DCSRMatrix(BinsparseTensor):
     format: ClassVar[str] = "DCSR"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
-        indices_0 = container.read_buffer("indices_0")
+        indices_0 = container.read_buffer("indices_0", copy=copy)
         return cls(
             **common,
             indices_0=indices_0,
-            pointers_to_1=container.read_buffer("pointers_to_1"),
-            indices_1=container.read_buffer("indices_1"),
-            values=container.read_buffer("values", count),
+            pointers_to_1=container.read_buffer("pointers_to_1", copy=copy),
+            indices_1=container.read_buffer("indices_1", copy=copy),
+            values=container.read_buffer("values", count, copy=copy),
         )
 
-    def _serialize(self, container):
-        container.write_buffer("indices_0", np.asarray(self.indices_0))
-        container.write_buffer("pointers_to_1", np.asarray(self.pointers_to_1))
-        container.write_buffer("indices_1", np.asarray(self.indices_1))
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer("indices_0", np.asarray(self.indices_0), copy=copy)
+        container.write_buffer(
+            "pointers_to_1", np.asarray(self.pointers_to_1), copy=copy
+        )
+        container.write_buffer("indices_1", np.asarray(self.indices_1), copy=copy)
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -444,19 +486,19 @@ class COORMatrix(BinsparseTensor):
     format: ClassVar[str] = "COOR"
 
     @classmethod
-    def _parse(cls, container, header, common):
+    def _parse(cls, container, header, common, copy):
         count = common["number_of_stored_values"]
         return cls(
             **common,
-            indices_0=container.read_buffer("indices_0"),
-            indices_1=container.read_buffer("indices_1"),
-            values=container.read_buffer("values", count),
+            indices_0=container.read_buffer("indices_0", copy=copy),
+            indices_1=container.read_buffer("indices_1", copy=copy),
+            values=container.read_buffer("values", count, copy=copy),
         )
 
-    def _serialize(self, container):
-        container.write_buffer("indices_0", np.asarray(self.indices_0))
-        container.write_buffer("indices_1", np.asarray(self.indices_1))
-        container.write_buffer("values", np.asarray(self.values))
+    def _serialize(self, container, copy):
+        container.write_buffer("indices_0", np.asarray(self.indices_0), copy=copy)
+        container.write_buffer("indices_1", np.asarray(self.indices_1), copy=copy)
+        container.write_buffer("values", np.asarray(self.values), copy=copy)
         return {}
 
 
@@ -510,6 +552,24 @@ _PREDEFINED_LEVELS: dict[str, tuple[dict[str, Any], tuple[int, ...] | None]] = {
     "COO": (_sparse(_ELEMENT, 2), None),
     "COOC": (_sparse(_ELEMENT, 2), (1, 0)),
 }
+
+
+def _custom_alias(header: dict[str, Any]) -> str | None:
+    try:
+        custom = header["custom"]
+        descriptor = custom["level"]
+        transpose = custom.get("transpose")
+    except (KeyError, TypeError) as error:
+        raise BinsparseParseError("custom format requires custom.level") from error
+    transpose_tuple = None if transpose is None else tuple(transpose)
+    return next(
+        (
+            alias
+            for alias, (alias_descriptor, alias_transpose) in _PREDEFINED_LEVELS.items()
+            if descriptor == alias_descriptor and transpose_tuple == alias_transpose
+        ),
+        None,
+    )
 
 
 __all__ = [

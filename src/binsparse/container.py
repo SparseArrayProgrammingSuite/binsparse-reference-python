@@ -61,7 +61,13 @@ class BinsparseContainer(ABC):
     def _write_header(self, value: dict[str, Any]) -> None:
         """Write a validated Binsparse header to the backend."""
 
-    def read_buffer(self, key: str, expected_size: int | None = None) -> np.ndarray:
+    def read_buffer(
+        self,
+        key: str,
+        expected_size: int | None = None,
+        *,
+        copy: bool | None = None,
+    ) -> np.ndarray:
         """Read and decode a named binary array."""
         header = self.read_header()
         try:
@@ -97,11 +103,17 @@ class BinsparseContainer(ABC):
             except KeyError as error:
                 raise BinsparseParseError(f"unknown Binsparse type {data_type!r}") from error
             return np.asarray(data, dtype=dtype)  # type: ignore[call-overload]
-        data = decode(declared, self._read_buffer(key))
+        encoded = self._read_buffer(key)
+        data = decode(declared, encoded)
         if expected_size is not None and data.size != expected_size:
             raise BinsparseParseError(
                 f"buffer {key!r} has size {data.size}, expected {expected_size}"
             )
+        shares_memory = np.shares_memory(data, encoded)
+        if copy is False and not shares_memory:
+            raise ValueError(f"copy=False cannot decode buffer {key!r} without copying")
+        if copy is True and shares_memory:
+            return data.copy()
         return data
 
     @abstractmethod
@@ -112,6 +124,8 @@ class BinsparseContainer(ABC):
         self,
         key: str,
         value: np.ndarray,
+        *,
+        copy: bool | None = None,
     ) -> None:
         """Encode, create or replace a named array and record its data type."""
         def encode(data: np.ndarray) -> tuple[np.ndarray, str]:
@@ -131,7 +145,13 @@ class BinsparseContainer(ABC):
             except KeyError as error:
                 raise TypeError(f"unsupported Binsparse dtype: {data.dtype}") from error
 
-        encoded, data_type = encode(np.asarray(value))
+        source = np.asarray(value)
+        encoded, data_type = encode(source)
+        shares_memory = np.shares_memory(encoded, source)
+        if copy is False and not shares_memory and not data_type.startswith("iso["):
+            raise ValueError(f"copy=False cannot encode buffer {key!r} without copying")
+        if copy is True and shares_memory:
+            encoded = encoded.copy()
         self._write_buffer(key, encoded)
         self.data_types[key] = data_type
 

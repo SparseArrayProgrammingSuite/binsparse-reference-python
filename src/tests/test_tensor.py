@@ -47,7 +47,7 @@ def test_explicit_format_requires_exact_match() -> None:
         values=np.array([5], dtype=np.int8),
     )
     container = NPZBinsparseContainer(archive)
-    tensor.serialize(container)
+    tensor.serialize(container, alias=True)
     with pytest.raises(BinsparseParseError):
         CustomTensor.parse(container)
 
@@ -70,7 +70,7 @@ def test_iso_parse_uses_zero_stride_array() -> None:
         ),
     )
     container = NPZBinsparseContainer(archive)
-    tensor.serialize(container)
+    tensor.serialize(container, alias=True)
     assert container.read_header()["format"] == "CSR"
     parsed = BinsparseTensor.parse(container)
 
@@ -115,6 +115,58 @@ def test_nested_iso_complex_buffer_round_trip() -> None:
     assert isinstance(parsed, DVECVector)
     assert parsed.values.strides == (0,)
     np.testing.assert_array_equal(parsed.values, values)
-
     with pytest.raises(BinsparseParseError, match="expected_size is required"):
         container.read_buffer("values")
+
+
+def test_alias_controls_serialized_and_parsed_representation() -> None:
+    original = CSRMatrix(
+        (2, 3),
+        1,
+        pointers_to_1=np.array([0, 0, 1]),
+        indices_1=np.array([2]),
+        values=np.array([5]),
+    )
+    predefined_archive: dict[str, np.ndarray] = {}
+    predefined_container = NPZBinsparseContainer(predefined_archive)
+    original.serialize(predefined_container)
+    assert predefined_container.read_header()["format"] == "CSR"
+    assert isinstance(
+        BinsparseTensor.parse(predefined_container, alias=False), CustomTensor
+    )
+
+    archive: dict[str, np.ndarray] = {}
+    container = NPZBinsparseContainer(archive)
+    original.serialize(container, alias=False)
+
+    assert container.read_header()["format"] == "custom"
+    assert isinstance(BinsparseTensor.parse(container), CustomTensor)
+    assert isinstance(BinsparseTensor.parse(container, alias=False), CustomTensor)
+    assert isinstance(BinsparseTensor.parse(container, alias=True), CSRMatrix)
+
+    custom = BinsparseTensor.parse(container, alias=False)
+    alias_archive: dict[str, np.ndarray] = {}
+    alias_container = NPZBinsparseContainer(alias_archive)
+    custom.serialize(alias_container, alias=True)
+    assert alias_container.read_header()["format"] == "CSR"
+
+
+def test_tensor_copy_policy_uses_one_container_boundary_copy() -> None:
+    values = np.arange(4, dtype=np.float32)
+    tensor = DVECVector((4,), 4, values=values)
+
+    shared_archive: dict[str, np.ndarray] = {}
+    shared_container = NPZBinsparseContainer(shared_archive)
+    tensor.serialize(shared_container, copy=False)
+    assert np.shares_memory(shared_archive["values"], values)
+    shared = BinsparseTensor.parse(shared_container, copy=False)
+    assert isinstance(shared, DVECVector)
+    assert np.shares_memory(shared.values, shared_archive["values"])
+
+    copied_archive: dict[str, np.ndarray] = {}
+    copied_container = NPZBinsparseContainer(copied_archive)
+    tensor.serialize(copied_container, copy=True)
+    assert not np.shares_memory(copied_archive["values"], values)
+    copied = BinsparseTensor.parse(copied_container, copy=True)
+    assert isinstance(copied, DVECVector)
+    assert not np.shares_memory(copied.values, copied_archive["values"])
